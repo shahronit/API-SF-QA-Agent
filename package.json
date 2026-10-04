@@ -1,0 +1,18 @@
+{
+  "name": "salesforce-api-qa-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Enterprise Salesforce API QA automation platform — Jira story to API tests, execution, Salesforce data validation, defects and reporting. Zero runtime dependencies (Node.js 22+).",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "seed": "node --disable-warning=ExperimentalWarning server/seed.js --reset",
+    "test": "node --disable-warning=ExperimentalWarning --test \"server/tests/*.test.js\"",
+    "snapshot": "node --disable-warning=ExperimentalWarning scripts/build-snapshot.js",
+    "test:ui": "node --disable-warning=ExperimentalWarning scripts/ui-smoke.js"
+  },
+  "license": "UNLICENSED"
+}

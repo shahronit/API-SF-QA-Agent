@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Salesforce API QA Platform</title>
+  <meta name="description" content="Enterprise Salesforce API test design, execution, data validation, defects and reporting.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563EB'/%3E%3Cpath d='M8 17l5 5 11-12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+        <div><div class="brand-name">API QA Platform</div><div class="brand-sub">Salesforce</div></div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-foot" id="sidebar-foot"></div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open navigation"></button>
+        <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
+        <div class="switcher" title="Project and environment">
+          <label class="sr-only" for="project-switch">Project</label>
+          <select id="project-switch"></select>
+          <span class="divider"></span>
+          <label class="sr-only" for="env-switch">Environment</label>
+          <select id="env-switch"></select>
+        </div>
+        <button class="search-trigger" id="search-btn" aria-label="Search"><span id="search-ico"></span><span class="label">Search stories, tests, runs…</span><kbd>⌘K</kbd></button>
+        <div style="position:relative">
+          <button class="icon-btn" id="notif-btn" aria-label="Notifications"></button>
+          <div class="popover hidden" id="notif-pop" role="dialog" aria-label="Notifications"></div>
+        </div>
+        <button class="icon-btn" id="theme-btn" aria-label="Toggle dark mode"></button>
+        <div class="avatar" id="avatar" title=""></div>
+      </header>
+      <div id="env-band"></div>
+      <main class="view" id="view" tabindex="-1"></main>
+    </div>
+  </div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  <div id="overlay-root"></div>
+
+  <script src="/js/core/icons.js"></script>
+  <script src="/js/core/ui.js"></script>
+  <script src="/js/core/api.js"></script>
+  <script src="/js/core/state.js"></script>
+  <script src="/js/core/charts.js"></script>
+  <script src="/js/core/components.js"></script>
+  <script src="/js/core/router.js"></script>
+  <script src="/js/pages/dashboard.js"></script>
+  <script src="/js/pages/projects.js"></script>
+  <script src="/js/pages/explorer.js"></script>
+  <script src="/js/pages/stories.js"></script>
+  <script src="/js/pages/scenarios.js"></script>
+  <script src="/js/pages/testcases.js"></script>
+  <script src="/js/pages/execution.js"></script>
+  <script src="/js/pages/defects.js"></script>
+  <script src="/js/pages/traceability.js"></script>
+  <script src="/js/pages/testdata.js"></script>
+  <script src="/js/pages/contracts.js"></script>
+  <script src="/js/pages/reports.js"></script>
+  <script src="/js/pages/automation.js"></script>
+  <script src="/js/pages/insights.js"></script>
+  <script src="/js/pages/agent.js"></script>
+  <script src="/js/pages/logs.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

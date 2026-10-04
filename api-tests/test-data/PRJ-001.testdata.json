@@ -1,0 +1,80 @@
+[
+  {
+    "id": "TD-0005",
+    "name": "Account rating Hot",
+    "category": "Regression",
+    "object": "Account",
+    "storyKey": "DEMO-102",
+    "payload": {
+      "Rating": "Hot"
+    },
+    "notes": "Demo test data"
+  },
+  {
+    "id": "TD-0006",
+    "name": "200-record contact batch",
+    "category": "Performance",
+    "object": "Contact",
+    "storyKey": "DEMO-101",
+    "payload": {
+      "records": 200,
+      "template": {
+        "LastName": "Perf {{$timestamp}}"
+      }
+    },
+    "notes": "Demo test data"
+  },
+  {
+    "id": "TD-0003",
+    "name": "LastName at max length (80)",
+    "category": "Boundary",
+    "object": "Contact",
+    "storyKey": "DEMO-101",
+    "payload": {
+      "LastName": "{{$randomString:80}}"
+    },
+    "notes": "Demo test data"
+  },
+  {
+    "id": "TD-0004",
+    "name": "Duplicate SAP invoice",
+    "category": "Integration",
+    "object": "Invoice__c",
+    "storyKey": "DEMO-103",
+    "payload": {
+      "invoiceNumber": "INV-2026-0001",
+      "erpInvoiceId": "SAP-90001",
+      "accountExternalId": "ERP-ACC-1001",
+      "amount": 12500,
+      "currency": "USD"
+    },
+    "notes": "Demo test data"
+  },
+  {
+    "id": "TD-0001",
+    "name": "Valid contact — partner portal",
+    "category": "Positive",
+    "object": "Contact",
+    "storyKey": "DEMO-101",
+    "payload": {
+      "FirstName": "Ana",
+      "LastName": "Silva",
+      "Email": "ana.silva@partner.example.com",
+      "Phone": "+1 415 555 0199",
+      "LeadSource": "Web"
+    },
+    "notes": "Demo test data"
+  },
+  {
+    "id": "TD-0002",
+    "name": "Contact missing LastName",
+    "category": "Negative",
+    "object": "Contact",
+    "storyKey": "DEMO-101",
+    "payload": {
+      "FirstName": "NoLast",
+      "Email": "nolast@example.com"
+    },
+    "notes": "Demo test data"
+  }
+]

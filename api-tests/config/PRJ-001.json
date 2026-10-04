@@ -1,0 +1,11 @@
+{
+  "projectId": "PRJ-001",
+  "name": "Acme Sales Cloud",
+  "environment": "QA",
+  "apiVersion": "62.0",
+  "instanceUrl": "https://acme--qa.sandbox.my.salesforce.com",
+  "credentialPrefix": "SF_ACME_QA_",
+  "jiraProjectKey": "DEMO",
+  "slaMs": 1500,
+  "note": "No secrets. Credentials are provided via environment variables or CI secrets."
+}

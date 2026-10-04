@@ -1,0 +1,17 @@
+{
+  "name": "salesforce-api-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CI-ready Salesforce API automation exported from the QA platform (Postman/Newman + platform runner).",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "export": "node scripts/export-assets.js --project PRJ-001",
+    "test:platform": "node scripts/run-suite.js --project PRJ-001 --priority P0,P1 --junit reports/junit.xml",
+    "test:qa": "node scripts/run-newman.js --collection collections/PRJ-001.postman_collection.json --environment environments/PRJ-001.qa.postman_environment.json",
+    "test:smoke": "node scripts/run-newman.js --collection collections/PRJ-001.postman_collection.json --environment environments/PRJ-001.qa.postman_environment.json --folder Functional --bail"
+  },
+  "devDependencies": {
+    "newman": "^6.2.1",
+    "newman-reporter-htmlextra": "^1.23.1"
+  }
+}
