@@ -633,4 +633,4 @@ async function generateSuite({ project, story, sf }) {
   return { analysis: slim, scenarios };
 }
 
-module.exports = { generateSuite, buildPayload, sampleValue, detectObjects };
+module.exports = { generateSuite, buildPayload, sampleValue, detectObjects, detectFields, OPS };

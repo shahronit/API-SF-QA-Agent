@@ -29,11 +29,11 @@ List endpoints accept `page`, `pageSize` (≤ 200), `sort`, `dir` (`ASC|DESC`) a
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/stories` | Stories with coverage (`sprint`, `status`, `q`) |
+| GET | `/api/stories` | Stories with coverage (`sprint`, `status`, `q`). Each story includes a `classification` (`needsApiTesting`, `confidence`, `reasons`, label `ASSUMED`) — a heuristic, advisory read on whether the ticket plausibly needs API testing at all |
 | POST | `/api/stories/sync` | Pull stories from Jira (`{ jql? }`). Read-only for Jira |
 | POST | `/api/stories` | Add a story manually |
 | GET | `/api/stories/:key` | Story with scenarios, tests, defects, proposals (`refresh=true` re-reads Jira) |
-| POST | `/api/generate` | `{ storyKey }` → proposal with analysis and scenarios. Nothing is saved as tests yet |
+| POST | `/api/generate` | `{ storyKey }` → proposal with analysis (including `classification`) and scenarios. Generation always proceeds regardless of classification; nothing is saved as tests yet |
 | GET | `/api/proposals`, `/api/proposals/:id` | Proposal history / detail |
 | POST | `/api/proposals/:id/approve` | `{ selected?: {scenarioIndex: [testIndex]}, postToJira?: boolean }`. Jira is changed only when `postToJira` is true |
 | POST | `/api/proposals/:id/reject` | Reject a proposal |
@@ -105,4 +105,4 @@ List endpoints accept `page`, `pageSize` (≤ 200), `sort`, `dir` (`ASC|DESC`) a
 | GET | `/api/postman/environment` | Postman environment with empty secret values |
 | POST | `/api/postman/import` | `{ collection, preview?, storyKey? }` |
 | POST | `/api/postman/newman` | Export and run Newman server-side in `api-tests/` |
-| POST | `/api/agent/command` | `{ text, projectId }` natural-language command → mode, message, data, navigation |
+| POST | `/api/agent/command` | `{ text, projectId, confirmProductionWrites?, confirmDelete? }` natural-language command → mode, message, data, navigation. Besides the Discover/Generate/Execute/Validate/Analyze/Defect/Regression/Report modes, a "test/try/check/verify/simulate" phrasing (e.g. "Test creating a Contact without a LastName") builds a single ad hoc test from the sentence, runs it immediately under the usual production-safety rules, saves it as a reusable test case tagged `chat-generated`, and returns the full masked `exchange` in the reply. "Analyze" requests are gated by `classification` — a story that looks like it doesn't need API testing is flagged with an explanation instead of silently generating tests; add "anyway"/"force"/"still" to the sentence to override |

@@ -607,6 +607,30 @@ class DemoSalesforce {
       return { status: 201, body: { status: 'SUCCESS', salesforceId: id } };
     }
     if (p === '/v1/erp/health' && method === 'GET') return { status: 200, body: { status: 'UP', erp: 'SAP S/4HANA (simulated)', middleware: 'MuleSoft (simulated)', latencyMs: 120 }, latency: 300 + Math.random() * 200 };
+    if (p === '/v1/payments/webhook' && method === 'POST') {
+      const idem = ctx.headers['Stripe-Event-Id'] || ctx.headers['stripe-event-id'];
+      if (idem && this.store.idempotency.has(idem)) return { status: 200, body: { ...this.store.idempotency.get(idem), action: 'duplicate-ignored' } };
+      if (!body || typeof body !== 'object') return { status: 400, body: { status: 'ERROR', errorCode: 'INVALID_PAYLOAD', message: 'Request body must be a JSON object' } };
+      if (!body.paymentIntentId) return { status: 400, body: { status: 'ERROR', errorCode: 'VALIDATION_ERROR', message: 'paymentIntentId is required', field: 'paymentIntentId' } };
+      if (body.amount === undefined || typeof body.amount !== 'number') return { status: 400, body: { status: 'ERROR', errorCode: 'VALIDATION_ERROR', message: 'amount must be a number', field: 'amount' } };
+      if (body.currency && !['USD', 'EUR', 'GBP', 'INR'].includes(body.currency)) return { status: 400, body: { status: 'ERROR', errorCode: 'VALIDATION_ERROR', message: `Unsupported currency ${body.currency}` } };
+      const map = this.store.objects.Payment__c;
+      const dup = [...map.values()].find((x) => x.Stripe_Payment_Intent_Id__c === body.paymentIntentId);
+      if (dup) { const result = { status: 'SUCCESS', salesforceId: dup.Id, action: 'duplicate-ignored' }; if (idem) this.store.idempotency.set(idem, result); return { status: 200, body: result }; }
+      let opportunityId = null;
+      if (body.opportunityExternalId) {
+        const opp = [...this.store.objects.Opportunity.values()].find((x) => x.Name === body.opportunityExternalId);
+        if (opp) opportunityId = opp.Id;
+      }
+      const id = this.insert('Payment__c', {
+        Name: `Payment ${body.paymentIntentId}`, Amount__c: body.amount, Currency__c: body.currency || 'USD',
+        Payment_Method__c: body.paymentMethod || 'Card', Status__c: 'Succeeded', Stripe_Payment_Intent_Id__c: body.paymentIntentId,
+        Processed_Date__c: nowIso(), ...(opportunityId ? { Opportunity__c: opportunityId } : {}),
+      });
+      const result = { status: 'SUCCESS', salesforceId: id, action: 'created' };
+      if (idem) this.store.idempotency.set(idem, result);
+      return { status: 200, body: result };
+    }
     return { status: 404, body: [{ errorCode: 'NOT_FOUND', message: `Could not find a match for URL ${p}` }] };
   }
 

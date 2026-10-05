@@ -1,0 +1,90 @@
+name: Salesforce API tests
+
+# Runs the approved API test suite against a Salesforce sandbox.
+# All credentials come from GitHub encrypted secrets — nothing is committed.
+#
+# Required secrets (per environment, e.g. "qa"):
+#   SF_CLIENT_ID, SF_CLIENT_SECRET, SF_LOGIN_URL   – connected app (client credentials flow)
+#   JIRA_EMAIL, JIRA_API_TOKEN                     – optional, only for defect status sync
+# Optional variables: QA_PROJECT (default PRJ-001), QA_PRIORITY (default P0,P1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      priority: { description: 'Priorities to run (comma separated)', default: 'P0,P1' }
+      testType: { description: 'Test types (comma separated, empty = all)', default: '' }
+  schedule:
+    - cron: '30 1 * * 1-5'   # weekdays 01:30 UTC
+  pull_request:
+    paths: ['server/**', 'public/**', 'api-tests/**', 'package.json']
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  platform-checks:
+    name: Unit + UI smoke tests (demo mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm test
+      - run: node --disable-warning=ExperimentalWarning scripts/ui-smoke.js
+
+  api-tests:
+    name: API regression (${{ vars.QA_PROJECT || 'PRJ-001' }})
+    needs: platform-checks
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: qa
+    timeout-minutes: 45
+    env:
+      PORT: 4317
+      HOST: 127.0.0.1
+      SEED_DEMO: 'false'
+      QA_PLATFORM_URL: http://127.0.0.1:4317
+      QA_PLATFORM_USER: github-actions
+      # Credential prefix must match the project's "credential prefix" (e.g. ACME_QA).
+      SF_ACME_QA_AUTH_FLOW: client_credentials
+      SF_ACME_QA_LOGIN_URL: ${{ secrets.SF_LOGIN_URL }}
+      SF_ACME_QA_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
+      SF_ACME_QA_CLIENT_SECRET: ${{ secrets.SF_CLIENT_SECRET }}
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Restore platform database (projects + approved tests)
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: qa-platform-db-${{ github.ref_name }}
+      - name: Start QA platform
+        run: |
+          npm start > platform.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf "$QA_PLATFORM_URL/api/health" && break; sleep 2; done
+      - name: Run API suite
+        run: |
+          node api-tests/scripts/run-suite.js \
+            --project "${{ vars.QA_PROJECT || 'PRJ-001' }}" \
+            --priority "${{ github.event.inputs.priority || vars.QA_PRIORITY || 'P0,P1' }}" \
+            ${{ github.event.inputs.testType && format('--type "{0}"', github.event.inputs.testType) || '' }} \
+            --label "GitHub Actions #${{ github.run_number }}" \
+            --junit api-tests/reports/junit.xml
+      - name: Download HTML report
+        if: always()
+        run: |
+          RUN=$(ls api-tests/reports/summary-*.json 2>/dev/null | head -1 | sed -E 's/.*summary-(.*)\.json/\1/')
+          [ -n "$RUN" ] && curl -sf "$QA_PLATFORM_URL/api/reports/$RUN?format=html" -o api-tests/reports/report.html || true
+      - name: Publish results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-reports
+          path: |
+            api-tests/reports/
+            platform.log
+          retention-days: 30

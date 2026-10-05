@@ -5,6 +5,7 @@ const { route, HttpError, required } = require('../http');
 const { repo, all, get, now, audit, nextId, transaction } = require('../db');
 const { salesforceFor, jiraFor } = require('../connectors');
 const { generateSuite } = require('../engine/generator');
+const { classifyStory } = require('../engine/classifier');
 const { projectFrom, getProject, paginate, likeFilter, inFilter } = require('./util');
 
 function upsertStory(projectId, s, source) {
@@ -36,7 +37,7 @@ route('GET', '/api/stories', (ctx) => {
   const page = paginate('stories', ctx, { where, params, sortable: ['key', 'summary', 'status', 'priority', 'sprint', 'syncedAt'], defaultSort: 'key', defaultDir: 'ASC' });
   const cov = storyCoverage(p.id);
   const defects = Object.fromEntries(all('SELECT storyKey, COUNT(*) AS n FROM defects WHERE projectId = $p GROUP BY storyKey', { p: p.id }).map((r) => [r.storyKey, r.n]));
-  page.items = page.items.map((s) => ({ ...s, coverage: cov[s.key] || { tests: 0, passed: 0, failed: 0, blocked: 0, executed: 0 }, defects: defects[s.key] || 0 }));
+  page.items = page.items.map((s) => ({ ...s, coverage: cov[s.key] || { tests: 0, passed: 0, failed: 0, blocked: 0, executed: 0 }, defects: defects[s.key] || 0, classification: classifyStory(s) }));
   page.sprints = all('SELECT DISTINCT sprint FROM stories WHERE projectId = $p AND sprint IS NOT NULL ORDER BY sprint', { p: p.id }).map((r) => r.sprint);
   return page;
 });
@@ -78,7 +79,7 @@ route('GET', '/api/stories/:key', async (ctx) => {
   const tests = all('SELECT id, scenarioId, title, method, endpoint, testType, priority, status, label, lastResult, lastRunAt FROM test_cases WHERE projectId = $p AND storyKey = $k ORDER BY seq', { p: p.id, k: s.key });
   const defects = repo.find('defects', 'projectId = $p AND storyKey = $k', { p: p.id, k: s.key });
   const proposals = all('SELECT id, status, createdAt, decidedAt FROM proposals WHERE projectId = $p AND storyKey = $k ORDER BY createdAt DESC LIMIT 5', { p: p.id, k: s.key });
-  return { ...s, scenarios, tests, defects, proposals, coverage: storyCoverage(p.id)[s.key] || null };
+  return { ...s, scenarios, tests, defects, proposals, coverage: storyCoverage(p.id)[s.key] || null, classification: classifyStory(s) };
 });
 
 // ── Generation ──
@@ -94,7 +95,8 @@ route('POST', '/api/generate', async (ctx) => {
   const sf = salesforceFor(p);
   const t0 = Date.now();
   const { analysis, scenarios } = await generateSuite({ project: p, story, sf });
-  const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: story.key, status: 'proposed', analysis: { ...analysis, generationMs: Date.now() - t0 }, scenarios, createdBy: ctx.user, createdAt: now() };
+  const classification = classifyStory(story);
+  const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: story.key, status: 'proposed', analysis: { ...analysis, classification, generationMs: Date.now() - t0 }, scenarios, createdBy: ctx.user, createdAt: now() };
   repo.insert('proposals', proposal);
   audit('generation', 'suite.proposed', { user: ctx.user, projectId: p.id, detail: { proposalId: proposal.id, storyKey: story.key, scenarios: scenarios.length, tests: scenarios.reduce((n, s) => n + s.testCases.length, 0) } });
   return proposal;

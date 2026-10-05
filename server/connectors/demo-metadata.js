@@ -130,6 +130,21 @@ const OBJECTS = {
     ],
     children: [],
   },
+  Payment__c: {
+    label: 'Payment', keyPrefix: 'a0C', custom: true,
+    fields: [
+      ...sys(),
+      f('Name', 'Payment Reference', 'string', { required: true, length: 80 }),
+      f('Opportunity__c', 'Opportunity', 'reference', { ref: 'Opportunity', rel: 'Opportunity__r' }),
+      f('Amount__c', 'Amount', 'currency', { required: true, precision: 16, scale: 2 }),
+      f('Currency__c', 'Currency', 'picklist', { values: ['USD', 'EUR', 'GBP', 'INR'], restricted: true }),
+      f('Payment_Method__c', 'Payment Method', 'picklist', { values: ['Card', 'ACH', 'Wire'] }),
+      f('Status__c', 'Status', 'picklist', { values: ['Pending', 'Succeeded', 'Failed', 'Refunded'], restricted: true }),
+      f('Stripe_Payment_Intent_Id__c', 'Stripe Payment Intent ID', 'string', { length: 60, unique: true, externalId: true }),
+      f('Processed_Date__c', 'Processed Date', 'datetime'),
+    ],
+    children: [],
+  },
   Order_Event__e: {
     label: 'Order Event', keyPrefix: 'e00', custom: true, isEvent: true,
     fields: [

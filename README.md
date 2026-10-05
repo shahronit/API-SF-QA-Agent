@@ -1,6 +1,6 @@
 # Salesforce API QA Platform
 
-An enterprise QA automation platform for Salesforce APIs. It takes a Jira story, analyses it against Salesforce metadata, proposes functional, negative, boundary, security and integration API tests for human review, executes the approved tests in the background with live status, validates the persisted Salesforce data field by field, drafts Jira defects for review (never automatically), and produces PDF, Excel, CSV and HTML reports with full traceability from story to defect.
+An enterprise QA automation platform for Salesforce APIs. It takes a Jira story, classifies on its own whether the ticket actually needs API testing, analyses it against Salesforce metadata, proposes functional, negative, boundary, security and integration API tests for human review, executes the approved tests in the background with live status, validates the persisted Salesforce data field by field, drafts Jira defects for review (never automatically), and produces PDF, Excel, CSV and HTML reports with full traceability from story to defect. An agent chat console also builds and runs one-off scenario tests from a plain-language prompt (e.g. "Test creating a Contact without a LastName") on demand, under the same safety and masking rules as everything else.
 
 It runs on **Node.js 22.5+ with zero runtime dependencies** — no `npm install` needed for the platform itself.
 
@@ -11,7 +11,7 @@ cp .env.example .env        # optional for demo mode; required for real orgs
 npm start                   # http://127.0.0.1:4317
 ```
 
-On first start the server seeds four demo projects (QA, UAT, Production, and an unconfigured live SIT project) with stories, approved suites, 14 days of execution history and two defects. Demo mode uses a built-in Salesforce simulator and a local Jira simulator, so every workflow works without credentials. The demo deliberately contains four realistic defects (a flow overwriting `Account.Rating`, an Apex REST 500 on duplicate invoices, a slow Case SOQL breaching the SLA, and a lead endpoint that drops `LeadSource`) so failure analysis, data validation and defect drafting have something real to show.
+On first start the server seeds five demo projects — Acme Sales Cloud (QA), Acme Service Cloud (UAT), Acme Production Smoke (read-only Production), Globex Commerce (an unconfigured live SIT project), and Northwind Retail — Order Management (Development) — with 13 realistic Jira stories (contact/lead/invoice sync, a Stripe payment webhook, duplicate-prevention rules, a Bulk API 2.0 migration job, Platform Event fan-out, wholesale onboarding), approved suites, 14 days of execution history and two defects. Demo mode uses a built-in Salesforce simulator and a local Jira simulator, so every workflow works without credentials. The demo deliberately contains four realistic defects (a flow overwriting `Account.Rating`, an Apex REST 500 on duplicate invoices, a slow Case SOQL breaching the SLA, and a lead endpoint that drops `LeadSource`) so failure analysis, data validation and defect drafting have something real to show.
 
 | Command | Purpose |
 | --- | --- |
@@ -40,13 +40,15 @@ When Salesforce is not reachable or not configured, the platform says so explici
 
 ## How the workflow fits together
 
-1. **Stories** — sync from Jira (JQL) or add manually.
+1. **Stories** — sync from Jira (JQL) or add manually. Every story is automatically classified (needs API testing: yes/no, with confidence and reasons) so you don't spend review time on UI-only or documentation tickets; the classification is always labelled ASSUMED and is advisory, not a hard block — "Analyze anyway" is one click away.
 2. **Generate** — the engine detects objects, fields, operations and integrations, reads metadata (live describe = VERIFIED, simulator or heuristics = ASSUMED), and proposes scenarios with P0–P3 priorities scored on seven factors.
 3. **Review and approve** — choose which tests to keep. Posting a coverage comment to Jira is a separate, explicit opt-in.
 4. **Execute** — runs in the background; the run ribbon fills cell by cell over server-sent events. Upstream setup tests that produce required variables are pulled in automatically; created records are cleaned up afterwards (never in Production).
 5. **Validate** — each write is re-read from Salesforce and compared field by field with what was sent.
 6. **Analyse and raise defects** — failures are categorised with root cause, evidence and recommended action. A defect is created only after you review the masked preview and click **Create Jira defect**; it is then linked to the story and its key stored on the result.
 7. **Report and automate** — export reports, Postman collections and environments, and run the suite in CI.
+
+Outside that story-driven flow, the **Agent console** also takes a one-line, plain-language scenario — "Verify Account rejects a value over the maximum field length", "Test querying Account without an access token" — and builds, safely executes and reports back on exactly that single test on demand, reusing the same priority scoring, production-safety confirmations, masking and defect-preview flow as everything else. Every ad hoc test is saved as a reusable test case (tagged `chat-generated`) and labelled ASSUMED, since it comes from a heuristic parse of free text rather than a reviewed proposal.
 
 ## Safety model
 

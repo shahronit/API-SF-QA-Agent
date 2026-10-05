@@ -32,7 +32,10 @@ test.before(async () => {
   let log = '';
   server.stdout.on('data', (d) => { log += d; });
   server.stderr.on('data', (d) => { log += d; });
-  for (let i = 0; i < 120; i++) {
+  // First boot triggers a full demo-data seed (multiple projects, generated
+  // suites and executions) — give it as much headroom as the other scripts
+  // that wait on the same cold start (ui-smoke.js, build-snapshot.js).
+  for (let i = 0; i < 240; i++) {
     try { const r = await fetch(BASE + '/api/health'); if (r.ok) return; } catch { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 500));
   }

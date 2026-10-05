@@ -37,7 +37,7 @@ The sidebar organizes features by your workflow:
 ### **Insights** (Analysis)
 - **Reports** — Download PDF/Excel execution reports
 - **Traceability** — See which stories are covered
-- **AI Assistant** — Ask questions about your tests
+- **AI Assistant** — Chat in plain language: ask broad questions ("Discover all APIs related to Contact"), or describe a one-off scenario ("Test creating a Contact without a LastName") and it builds, runs and reports on that exact test immediately
 - **Audit Log** — See who did what and when
 
 ## Quick Start
@@ -48,6 +48,7 @@ The sidebar organizes features by your workflow:
 
 2. **Go to Stories & Tests**
    - Sync stories from Jira, or add them manually
+   - Each story shows whether it likely **needs API testing** (a quick heuristic read, not a hard rule) — use it to skip UI-only or documentation tickets, not as the final word
    - Click "Generate" on a story to create API tests
 
 3. **Review the Generated Tests**
@@ -87,6 +88,16 @@ If testing Production:
 - Salesforce session IDs are redacted
 - Jira credentials stay in environment variables
 
+### **Ticket Classification**
+- Every story is automatically checked for whether it plausibly needs API testing at all (API/webhook/integration language vs. pure UI/copy/documentation language)
+- It's a heuristic suggestion labelled **ASSUMED**, shown as a badge on the story list and a callout on the generated proposal — it never blocks Generate, and in the Agent console an "Analyze" request on a low-relevance story explains why and offers "Analyze anyway"
+- When in doubt, it defaults to assuming testing is needed rather than silently skipping a story
+
+### **Ad Hoc Scenario Testing**
+- The AI Assistant chat can build and run a single test from one sentence — no story, generation or approval step required
+- It parses the sentence for the object, the condition (missing/invalid field, boundary, picklist, auth, not-found, etc.) and builds one HTTP call with assertions
+- The test still goes through the same production-safety confirmation, priority scoring and masking as everything else, and is saved as a normal test case (tagged `chat-generated`) so it shows up in Test Cases for reuse
+
 ## Common Tasks
 
 ### Generate Tests from a Story
@@ -109,6 +120,13 @@ If testing Production:
 4. Click **Preview Jira defect**
 5. Review the masked summary
 6. Click **Create Jira defect**
+
+### Test a One-Off Scenario Without Writing a Story
+1. Go to **AI Assistant**
+2. Type a plain-language scenario, e.g. "Check what happens with an invalid email on Contact" or "Test deleting a non-existent Case"
+3. Confirm the production-write prompt if the current project is Production
+4. Read the inline result (status, response time, assertions) or click **View full request/response** for the masked details
+5. Find it later in **Test Cases**, tagged `chat-generated`
 
 ### Export Tests for CI/CD
 1. Go to **CI/CD**

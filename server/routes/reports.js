@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { route, HttpError, raw } = require('../http');
-const { repo, all, get, now, audit } = require('../db');
+const { repo, all, get, now, audit, nextId } = require('../db');
 const { config } = require('../config');
 const reports = require('../engine/reports');
 const postman = require('../engine/postman');
@@ -11,6 +11,9 @@ const runner = require('../engine/runner');
 const { salesforceFor } = require('../connectors');
 const { generateSuite } = require('../engine/generator');
 const { summarise } = require('../engine/analyzer');
+const { classifyStory } = require('../engine/classifier');
+const { pickObject, buildAdHocTest } = require('../engine/adhoc');
+const { prioritise } = require('../engine/priority');
 const { projectFrom, getProject } = require('./util');
 const { selectTests, withDependencies } = require('./runs');
 const { checkOperation, isProduction } = require('../engine/safety');
@@ -209,12 +212,16 @@ route('POST', '/api/agent/command', async (ctx) => {
   if (storyKey && /(analy[sz]e|generate)/.test(lower)) {
     const story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: storyKey });
     if (!story) throw new HttpError(404, `Story ${storyKey} is not in ${p.name}. Sync stories from Jira first.`, { action: 'Open Jira stories and click "Sync from Jira".' });
+    const cls = classifyStory(story);
+    if (!cls.needsApiTesting && cls.confidence === 'high' && !/\b(anyway|force|still)\b/.test(lower)) {
+      return reply('Discover', `${storyKey} does not look like it needs API testing: ${cls.reasons.join(' ')} Say "Analyze ${storyKey} anyway" if you want scenarios proposed regardless.`, { data: { classification: cls }, examples: [`Analyze ${storyKey} anyway`] });
+    }
     const { analysis, scenarios } = await generateSuite({ project: p, story, sf: salesforceFor(p) });
-    const { nextId } = require('../db');
-    const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey, status: 'proposed', analysis, scenarios, createdBy: ctx.user, createdAt: now() };
+    const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey, status: 'proposed', analysis: { ...analysis, classification: cls }, scenarios, createdBy: ctx.user, createdAt: now() };
     repo.insert('proposals', proposal);
     const n = scenarios.reduce((s, x) => s + x.testCases.length, 0);
-    return reply('Generate', `Analysed ${storyKey}: ${analysis.objects.join(', ') || 'no objects'} · operations ${analysis.operations.join(', ') || 'none detected'}. Proposed ${scenarios.length} scenarios / ${n} test cases (metadata ${analysis.metadataLabel}). Review and approve before anything is saved or sent to Jira.`, { navigate: `/stories/${storyKey}?proposal=${proposal.id}`, proposalId: proposal.id });
+    const clsNote = cls.needsApiTesting ? '' : ' Note: this ticket may not need API testing — review carefully before approving.';
+    return reply('Generate', `Analysed ${storyKey}: ${analysis.objects.join(', ') || 'no objects'} · operations ${analysis.operations.join(', ') || 'none detected'}. Proposed ${scenarios.length} scenarios / ${n} test cases (metadata ${analysis.metadataLabel}).${clsNote} Review and approve before anything is saved or sent to Jira.`, { navigate: `/stories/${storyKey}?proposal=${proposal.id}`, proposalId: proposal.id, data: { classification: cls } });
   }
   if (/\bdiscover\b/.test(lower)) {
     const sf = salesforceFor(p);
@@ -240,10 +247,49 @@ route('POST', '/api/agent/command', async (ctx) => {
     const story = { key: `${p.jiraProjectKey || 'ADHOC'}-0`, summary: `${objMatch} API ${type.toLowerCase()} coverage`, description: `Create, update and query ${objMatch} records through the Salesforce API. Invalid input must be rejected.`, acceptanceCriteria: '' };
     const { analysis, scenarios } = await generateSuite({ project: p, story, sf: salesforceFor(p) });
     const filtered = scenarios.filter((s) => s.type === type);
-    const { nextId } = require('../db');
     const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: 'AD-HOC', status: 'proposed', analysis: { ...analysis, storyKey: 'AD-HOC', summary: story.summary }, scenarios: filtered, createdBy: ctx.user, createdAt: now() };
     repo.insert('proposals', proposal);
     return reply('Generate', `Proposed ${filtered.reduce((n, s) => n + s.testCases.length, 0)} ${type} tests for ${objMatch} (metadata ${analysis.metadataLabel}). Review and approve to add them.`, { navigate: `/generate/${proposal.id}`, proposalId: proposal.id });
+  }
+  if (/\b(test|try|check|verify|simulate)\b/i.test(lower) && !/\bgenerate\b/.test(lower)) {
+    const sf = salesforceFor(p);
+    if (!sf.available) return reply('Discover', sf.unavailableExplanation().evidence[0], { explanation: sf.unavailableExplanation() });
+    let catalog;
+    try { catalog = await sf.describeGlobal(); } catch (e) { throw new HttpError(502, e.explanation ? e.explanation.title : e.message, e.explanation || {}); }
+    const objectName = (objMatch && catalog.some((o) => o.name === objMatch)) ? objMatch : pickObject(text, catalog);
+    if (!objectName) {
+      return reply('Discover', 'I could not tell which Salesforce object to test. Name one, e.g. "Test creating a Contact without a LastName".', { data: { objects: catalog.slice(0, 20) } });
+    }
+    let describe;
+    try { describe = await sf.describe(objectName); } catch (e) { throw new HttpError(404, e.explanation ? e.explanation.title : e.message, e.explanation || {}); }
+    const draft = buildAdHocTest({ describe, objectName, text });
+    const safety = checkOperation(p, { method: draft.method, path: draft.endpoint, body: draft.body }, { confirmProductionWrites: ctx.body.confirmProductionWrites, confirmDelete: ctx.body.confirmDelete });
+    if (safety) throw new HttpError(409, safety.title, safety);
+    const pr = prioritise({ ...draft, apiType: draft.endpoint.includes('/composite/') ? 'Composite' : 'REST' }, { project: p });
+    const tcId = nextId('TC', 5);
+    const seq = (get('SELECT MAX(seq) AS m FROM test_cases WHERE projectId = $p', { p: p.id }).m || 0) + 10;
+    repo.insert('test_cases', {
+      id: tcId, projectId: p.id, scenarioId: null, storyKey: null, seq,
+      title: draft.title, description: draft.notes.length ? draft.notes.join(' ') : 'Generated from an agent chat scenario.',
+      apiType: draft.endpoint.includes('/composite/') ? 'Composite' : 'REST', method: draft.method, endpoint: draft.endpoint, auth: draft.auth || 'default',
+      headers: {}, query: draft.query || {}, body: draft.body === undefined ? null : draft.body, bodyRaw: null,
+      assertions: draft.assertions, extract: draft.extract || [], sfValidation: draft.sfValidation || null, cleanup: draft.cleanup || null,
+      timeoutMs: null, object: draft.object, testType: draft.testType, priority: pr.priority, priorityReason: pr,
+      status: 'ready', label: 'ASSUMED', tags: ['chat-generated'], automated: 1, createdAt: now(), updatedAt: now(),
+    });
+    audit('generation', 'adhoc.scenario-created', { user: ctx.user, projectId: p.id, detail: { testCaseId: tcId, text: text.slice(0, 200) } });
+    const run = runner.startRun({ project: p, testCases: [repo.get('test_cases', tcId)], user: ctx.user, options: { confirmProductionWrites: ctx.body.confirmProductionWrites, confirmDelete: ctx.body.confirmDelete, label: `Chat scenario: ${text.slice(0, 60)}`, trigger: 'agent-chat' } });
+    await runner.waitForRun(run.id);
+    const resultRow = repo.find('run_results', 'runId = $r', { r: run.id })[0];
+    const testCase = repo.get('test_cases', tcId);
+    const exchange = { ...resultRow, testCase: { id: testCase.id, title: testCase.title, storyKey: null, scenarioId: null, label: testCase.label } };
+    const noteText = draft.notes.length ? ` (${draft.notes.join(' ')})` : '';
+    const statusWord = resultRow.status === 'passed' ? 'passed' : resultRow.status === 'failed' ? 'failed' : resultRow.status;
+    const candidates = resultRow.status === 'failed' && resultRow.analysis && resultRow.analysis.defectCandidate && !resultRow.defectKey
+      ? [{ resultId: resultRow.id, title: resultRow.title, rootCause: resultRow.analysis.rootCause }] : undefined;
+    return reply('Execute', `Ran "${draft.title}" against ${objectName} in ${p.environment}: ${statusWord}${resultRow.statusCode ? ` (HTTP ${resultRow.statusCode})` : ''}.${noteText} Saved as test case ${tcId} (tag: chat-generated) for reuse.`, {
+      navigate: `/testcases?id=${tcId}`, exchange, data: candidates ? { candidates } : undefined,
+    });
   }
   if (/\b(run|execute)\b/.test(lower)) {
     const body = { filter: {} };

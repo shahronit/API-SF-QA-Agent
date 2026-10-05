@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+data/
+api-tests/reports/*
+!api-tests/reports/.gitkeep
+api-tests/environments/*.local.json
+*.pem
+*.key
+.DS_Store

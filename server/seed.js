@@ -10,6 +10,7 @@ const crypto = require('node:crypto');
 const { repo, all, run: sqlRun, now, nextId, DB_FILE, db } = require('./db');
 const { salesforceFor, jiraFor } = require('./connectors');
 const { generateSuite } = require('./engine/generator');
+const { prioritise } = require('./engine/priority');
 const runner = require('./engine/runner');
 const { buildDraft } = require('./engine/defects');
 const { checkOperation } = require('./engine/safety');
@@ -48,6 +49,14 @@ const ENDPOINTS = {
     requestMapping: { lastName: 'LastName', company: 'Company', leadSource: 'LeadSource', rating: 'Rating' },
     invalidPayload: { firstName: 'No company' }, successStatus: [201],
   },
+  paymentWebhook: {
+    name: 'Stripe payment webhook', path: '/services/apexrest/v1/payments/webhook', method: 'POST', object: 'Payment__c', direction: 'Stripe → MuleSoft → Salesforce',
+    keywords: ['stripe', 'payment webhook', 'payment gateway', 'payment intent'],
+    description: 'Stripe sends a payment_intent.succeeded webhook through MuleSoft, which creates/updates a Payment record linked to the Opportunity and marks it paid.',
+    samplePayload: { paymentIntentId: 'pi_QA_{{runId}}', opportunityExternalId: 'OPP-QA-1001', amount: 4200.0, currency: 'USD', paymentMethod: 'Card', eventType: 'payment_intent.succeeded' },
+    requestMapping: { paymentIntentId: 'Stripe_Payment_Intent_Id__c', amount: 'Amount__c', currency: 'Currency__c', paymentMethod: 'Payment_Method__c' },
+    idempotencyHeader: 'Stripe-Event-Id', duplicateExpect: [200], invalidPayload: { opportunityExternalId: 'OPP-QA-1001', eventType: 'payment_intent.succeeded' }, successStatus: [200], idPath: '$.salesforceId',
+  },
 };
 
 const STORIES = [
@@ -74,6 +83,21 @@ const STORIES = [
     description: 'MuleSoft calls the contact sync endpoint to upsert Contacts by external id. Retries carry the same Idempotency-Key.', acceptanceCriteria: '- Upsert by externalId\n- Retries with the same Idempotency-Key return the same record\n- Missing lastName returns 400' },
   { key: 'PRD-301', projectKey: 'PRD', summary: 'Production smoke: Account read APIs', priority: 'Highest', sprint: 'Release 26.10', status: 'Done', components: ['Release'], assignee: 'Release team',
     description: 'Post-deployment smoke checks query Account records and org limits in Production. No data may be modified.', acceptanceCriteria: '- Account query returns 200\n- API limits endpoint reachable' },
+  { key: 'DEMO-107', projectKey: 'DEMO', summary: 'Stripe payment webhook updates Payment and Opportunity status', priority: 'Highest', sprint: 'Sprint 26', status: 'In QA', components: ['Billing', 'Integration'], assignee: 'Meera K.',
+    description: 'As the billing platform, I want Stripe payment_intent.succeeded webhooks (relayed through MuleSoft) to create a Payment record linked to the paying Opportunity via REST/Apex REST, so finance has an auditable record of every successful charge without manual entry.\n\nThe webhook payload includes the Stripe payment intent id, amount, currency and payment method. Retried webhooks (Stripe redelivers on timeout) must not create duplicate Payment records.',
+    acceptanceCriteria: '- A valid payment_intent.succeeded payload creates a Payment with Amount, Currency and Payment Method mapped\n- The Stripe payment intent id is stored and enforced as unique\n- Retrying the same event (same Stripe-Event-Id) does not create a duplicate Payment\n- An invalid payload (missing amount) returns a structured 400 error\n- Unauthenticated calls are rejected' },
+  { key: 'DEMO-108', projectKey: 'DEMO', summary: 'Prevent duplicate Leads submitted by the web form', priority: 'High', sprint: 'Sprint 26', status: 'Ready for QA', components: ['Marketing'], assignee: 'Daniel O.',
+    description: 'As a marketing operations analyst, I want the Lead creation API to reject or flag obviously duplicate submissions (same email within a short window) from the web form, so sales reps are not assigned the same prospect twice.\n\nThis story only covers the record-level validation exposed through the API; the fuzzy-matching duplicate rule itself is configured in Salesforce and out of scope here.',
+    acceptanceCriteria: '- A Lead with a valid, unique Email and required Company/LastName returns 201\n- LastName and Company are required; omitting either is rejected with a clear error\n- A malformed Email is rejected with INVALID_EMAIL_ADDRESS\n- Rating must be one of the standard values when provided' },
+  { key: 'SVC-203', projectKey: 'SVC', summary: 'Migrate 50,000 legacy Contacts from the old CRM via Bulk API 2.0', priority: 'High', sprint: 'Sprint 13', status: 'In QA', components: ['Data Migration'], assignee: 'Lina M.',
+    description: 'As the data migration lead, I want to load approximately 50,000 legacy Contact records from the retiring CRM into Salesforce using Bulk API 2.0 ingest jobs, so the one-time cutover completes within the maintenance window instead of timing out on single-record REST calls.\n\nRecords are batched into CSV uploads of up to 10,000 rows per job. A job must be created, its data uploaded, and the job closed before Salesforce begins processing.',
+    acceptanceCriteria: '- Creating an ingest job for Contact with operation=insert returns a job Id and state Open\n- Uploading CSV batch data to the job succeeds\n- Closing the job (state=UploadComplete) is accepted\n- Successful and failed record results can be retrieved as CSV after processing' },
+  { key: 'NWR-401', projectKey: 'NWR', summary: 'Publish Order Status platform events for downstream fulfillment systems', priority: 'High', sprint: 'Wave 3', status: 'In QA', components: ['Fulfillment', 'Integration'], assignee: 'Oscar T.',
+    description: 'As the fulfillment integration owner, I want Salesforce to publish an Order_Status platform event whenever a wholesale order changes status, so the warehouse management system and carrier booking service can react in near real time without polling Salesforce.\n\nEvents are published via the standard sObject API against the platform event object (suffix __e) and fanned out to subscribers over the event bus.',
+    acceptanceCriteria: '- Publishing an Order_Status event with Order Number, Status and Amount returns 201 with an event Id\n- Order Number is required; omitting it is rejected\n- Subscribers receive the event within the platform event delivery window (not directly testable via REST; verified operationally)' },
+  { key: 'NWR-402', projectKey: 'NWR', summary: 'Create wholesale Account and primary Contact via API', priority: 'Medium', sprint: 'Wave 3', status: 'Ready for QA', components: ['Onboarding'], assignee: 'Oscar T.',
+    description: 'As the partner onboarding team, I want new wholesale distributor Accounts and their primary Contact created through the Salesforce REST API from the partner signup portal, so new distributors can start placing orders the same day.',
+    acceptanceCriteria: '- A valid Account with Name returns 201\n- The primary Contact can be created and linked to the Account\n- Missing the Account Name is rejected with REQUIRED_FIELD_MISSING' },
 ];
 
 const OPENAPI_YAML = `openapi: 3.0.3
@@ -202,9 +226,9 @@ function insertProjects() {
   const projects = [
     { ...base, id: 'PRJ-001', name: 'Acme Sales Cloud', description: 'Core Sales Cloud APIs and SAP/MuleSoft integrations.', sfOrg: 'acme--qa', environment: 'QA', instanceUrl: 'https://acme--qa.sandbox.my.salesforce.com', mode: 'demo', credentialRef: 'ACME_QA', jiraProjectKey: 'DEMO', jiraUrl: 'https://demo-jira.local', automationRepo: 'github.com/acme/sf-api-tests', postmanCollection: 'api-tests/collections/PRJ-001.postman_collection.json',
       testDataConfig: { autoCleanup: true, variables: { defaultAccountNumber: 'ACC-1001' } },
-      integrationConfig: { middleware: 'MuleSoft (simulated)', externalSystems: ['SAP S/4HANA', 'Marketing website'], endpoints: [ENDPOINTS.invoices, ENDPOINTS.leads] },
+      integrationConfig: { middleware: 'MuleSoft (simulated)', externalSystems: ['SAP S/4HANA', 'Marketing website', 'Stripe'], endpoints: [ENDPOINTS.invoices, ENDPOINTS.leads, ENDPOINTS.paymentWebhook] },
       notificationConfig: { onRunComplete: 'email', recipients: ['qa-team@acme.example.com'], slackChannel: '#sf-qa-alerts', onlyOnFailure: true },
-      businessConfig: { slaMs: 1500, criticalObjects: ['Contact', 'Account', 'Invoice__c'], highTrafficObjects: ['Contact', 'Case'], lowPrivilegeExpectations: LOWPRIV,
+      businessConfig: { slaMs: 1500, criticalObjects: ['Contact', 'Account', 'Invoice__c', 'Payment__c'], highTrafficObjects: ['Contact', 'Case'], lowPrivilegeExpectations: LOWPRIV,
         queryTemplates: { Case: { label: 'open portal cases', soql: "SELECT Id, CaseNumber, Subject, Status, Priority FROM Case WHERE Status = 'New' ORDER BY CreatedDate DESC LIMIT 50" } } } },
     { ...base, id: 'PRJ-002', name: 'Acme Service Cloud', description: 'Customer portal case APIs and contact master-data sync.', sfOrg: 'acme--uat', environment: 'UAT', instanceUrl: 'https://acme--uat.sandbox.my.salesforce.com', mode: 'demo', credentialRef: 'ACME_UAT', jiraProjectKey: 'SVC', jiraUrl: 'https://demo-jira.local', automationRepo: 'github.com/acme/sf-api-tests',
       testDataConfig: { autoCleanup: true, variables: {} },
@@ -216,9 +240,14 @@ function insertProjects() {
       businessConfig: { slaMs: 2000, criticalObjects: ['Account'] } },
     { ...base, id: 'PRJ-004', name: 'Globex Commerce', description: 'B2B Commerce order APIs — awaiting connected-app credentials.', sfOrg: 'globex--sit', environment: 'SIT', instanceUrl: 'https://globex--sit.sandbox.my.salesforce.com', mode: 'live', credentialRef: 'GLOBEX_SIT', jiraProjectKey: 'GLX', jiraUrl: 'https://globex.atlassian.net', jiraCredentialRef: 'GLOBEX',
       testDataConfig: { autoCleanup: true, variables: {} }, integrationConfig: { endpoints: [] }, notificationConfig: {}, businessConfig: { slaMs: 2000 } },
+    { ...base, id: 'PRJ-005', name: 'Northwind Retail — Order Management', description: 'Wholesale distributor onboarding and order-status platform events, in active development.', sfOrg: 'northwind--dev', environment: 'Development', instanceUrl: 'https://northwind--dev.sandbox.my.salesforce.com', mode: 'demo', credentialRef: 'NORTHWIND_DEV', jiraProjectKey: 'NWR', jiraUrl: 'https://demo-jira.local',
+      testDataConfig: { autoCleanup: true, variables: {} },
+      integrationConfig: { middleware: 'Platform Events (native)', externalSystems: ['Warehouse management system', 'Carrier booking service'], endpoints: [] },
+      notificationConfig: { onRunComplete: 'none' },
+      businessConfig: { slaMs: 2000, criticalObjects: ['Account'], highTrafficObjects: [] } },
   ];
   for (const p of projects) repo.insert('projects', p);
-  sqlRun("INSERT OR REPLACE INTO counters (name, value) VALUES ('PRJ', 4)");
+  sqlRun("INSERT OR REPLACE INTO counters (name, value) VALUES ('PRJ', 5)");
   return projects;
 }
 
@@ -253,6 +282,36 @@ async function generateAndApprove(project, storyKey, seqBase) {
       n++;
     });
   });
+  return n;
+}
+
+/**
+ * Insert one hand-curated scenario + test cases that exercise an API shape
+ * the generic generator does not model end-to-end (Bulk API 2.0 job
+ * lifecycle, Platform Event publish). Mirrors generateAndApprove's storage
+ * shape but skips story-driven generation; priority is still computed.
+ */
+function insertManualScenario(project, storyKey, { title, description, type, apiType, object }, testCases, seqBase) {
+  const scId = nextId('TS', 4);
+  repo.insert('scenarios', { id: scId, projectId: project.id, storyKey, title, description, apiType, object, type, priority: 'P2', label: 'ASSUMED', status: 'active', createdAt: iso(Date.now() - 12 * DAY), updatedAt: now() });
+  let n = 0;
+  testCases.forEach((t, ti) => {
+    const pr = prioritise({ ...t, apiType, object: t.object || object }, { project });
+    repo.insert('test_cases', {
+      id: nextId('TC', 5), projectId: project.id, scenarioId: scId, storyKey, seq: seqBase + ti,
+      title: t.title, description: t.description || null, apiType: t.apiType || apiType, method: t.method, endpoint: t.endpoint, auth: t.auth || 'default',
+      headers: t.headers || {}, query: t.query || {}, body: t.body === undefined ? null : t.body, bodyRaw: t.bodyRaw || null,
+      assertions: t.assertions, extract: t.extract || [], sfValidation: t.sfValidation || null, cleanup: t.cleanup || null, timeoutMs: t.timeoutMs || null, object: t.object || object,
+      testType: t.testType || type, priority: t.priority || pr.priority, priorityReason: pr, status: 'ready', label: 'ASSUMED', tags: t.tags || ['manual-curated'], automated: 1,
+      createdAt: iso(Date.now() - 12 * DAY), updatedAt: now(),
+    });
+    n++;
+  });
+  if (n) {
+    const order = ['P0', 'P1', 'P2', 'P3'];
+    const best = repo.find('test_cases', 'scenarioId = $s', { s: scId }).reduce((b, t) => (order.indexOf(t.priority) < order.indexOf(b) ? t.priority : b), 'P3');
+    repo.update('scenarios', scId, { priority: best });
+  }
   return n;
 }
 
@@ -320,8 +379,8 @@ async function seed({ log = console.log, reset = false } = {}) {
   const t0 = Date.now();
   const projects = insertProjects();
   insertJira();
-  const [p1, p2, p3] = projects;
-  for (const p of [p1, p2, p3]) await syncStories(p);
+  const [p1, p2, p3, , p5] = projects;
+  for (const p of [p1, p2, p3, p5]) await syncStories(p);
   log('Projects and Jira stories created.');
 
   let n = 0;
@@ -330,10 +389,61 @@ async function seed({ log = console.log, reset = false } = {}) {
   n += await generateAndApprove(p1, 'DEMO-103', 20000);
   n += await generateAndApprove(p1, 'DEMO-104', 30000);
   n += await generateAndApprove(p1, 'DEMO-105', 40000);
+  n += await generateAndApprove(p1, 'DEMO-107', 50000);
+  n += await generateAndApprove(p1, 'DEMO-108', 60000);
   n += await generateAndApprove(p2, 'SVC-201', 1000);
   n += await generateAndApprove(p2, 'SVC-202', 10000);
   n += await generateAndApprove(p3, 'PRD-301', 1000);
-  log(`Generated and approved ${n} test cases from 8 stories.`);
+  n += await generateAndApprove(p5, 'NWR-402', 1000);
+  n += insertManualScenario(p2, 'SVC-203', {
+    title: 'Bulk API 2.0 — legacy Contact migration job lifecycle',
+    description: 'Create, load and close a Bulk API 2.0 ingest job that migrates legacy Contact records from the retiring CRM, matching the batched-CSV approach described in the story.',
+    type: 'Integration', apiType: 'Bulk API 2.0', object: 'Contact',
+  }, [
+    {
+      title: 'Create a Bulk API 2.0 ingest job for Contact insert', method: 'POST', endpoint: '/services/data/v{{apiVersion}}/jobs/ingest',
+      body: { object: 'Contact', operation: 'insert', lineEnding: 'LF' },
+      assertions: [{ type: 'status', op: 'eq', expected: 200 }, { type: 'jsonpath', path: '$.id', op: 'exists' }, { type: 'jsonpath', path: '$.state', op: 'eq', expected: 'Open' }],
+      extract: [{ var: 'bulkJobId', path: '$.id' }], testType: 'Integration', tags: ['bulk-api'],
+    },
+    {
+      title: 'Upload the legacy Contact CSV batch to the job', method: 'PUT', endpoint: '/services/data/v{{apiVersion}}/jobs/ingest/{{bulkJobId}}/batches',
+      bodyRaw: 'LastName,Email\nLegacy One,legacy1@example.com\nLegacy Two,legacy2@example.com', headers: { 'Content-Type': 'text/csv' },
+      assertions: [{ type: 'status', op: 'eq', expected: 201 }], testType: 'Integration', tags: ['bulk-api'],
+    },
+    {
+      title: 'Close the ingest job (state=UploadComplete)', method: 'PATCH', endpoint: '/services/data/v{{apiVersion}}/jobs/ingest/{{bulkJobId}}',
+      body: { state: 'UploadComplete' },
+      assertions: [{ type: 'status', op: 'eq', expected: 200 }, { type: 'jsonpath', path: '$.state', op: 'eq', expected: 'UploadComplete' }], testType: 'Integration', tags: ['bulk-api'],
+    },
+    {
+      title: 'Creating an ingest job for an unsupported object is rejected', method: 'POST', endpoint: '/services/data/v{{apiVersion}}/jobs/ingest',
+      body: { object: 'NotARealObject__c', operation: 'insert' },
+      assertions: [{ type: 'status', op: 'eq', expected: 400 }, { type: 'sfError', op: 'eq', expected: 'INVALIDJOB' }], testType: 'Negative', tags: ['bulk-api'],
+    },
+  ], 70000);
+  n += insertManualScenario(p5, 'NWR-401', {
+    title: 'Platform Events — Order status fan-out',
+    description: 'Publish Order_Status platform events over the standard sObject API so the warehouse management system and carrier booking service can react to order changes.',
+    type: 'Integration', apiType: 'Platform Events', object: 'Order_Event__e',
+  }, [
+    {
+      title: 'Publish an Order_Status event with a valid payload', method: 'POST', endpoint: '/services/data/v{{apiVersion}}/sobjects/Order_Event__e',
+      body: { Order_Number__c: 'ORD-QA-{{runId}}', Status__c: 'Fulfilled', Amount__c: 249.99 },
+      assertions: [{ type: 'status', op: 'eq', expected: 201 }, { type: 'jsonpath', path: '$.success', op: 'eq', expected: true }], testType: 'Functional', tags: ['platform-events'],
+    },
+    {
+      title: 'Publishing an Order_Status event without Order_Number__c is rejected', method: 'POST', endpoint: '/services/data/v{{apiVersion}}/sobjects/Order_Event__e',
+      body: { Status__c: 'Fulfilled', Amount__c: 100 },
+      assertions: [{ type: 'status', op: 'eq', expected: 400 }, { type: 'sfError', op: 'eq', expected: 'REQUIRED_FIELD_MISSING' }], testType: 'Negative', tags: ['platform-events'],
+    },
+    {
+      title: 'Publishing an Order_Status event without an access token is rejected', method: 'POST', endpoint: '/services/data/v{{apiVersion}}/sobjects/Order_Event__e',
+      body: { Order_Number__c: 'ORD-QA-{{runId}}', Status__c: 'Fulfilled' }, auth: 'none',
+      assertions: [{ type: 'status', op: 'eq', expected: 401 }, { type: 'sfError', op: 'eq', expected: 'INVALID_SESSION_ID' }], testType: 'Security', tags: ['authentication', 'platform-events'],
+    },
+  ], 1000);
+  log(`Generated and approved ${n} test cases across 13 stories.`);
 
   // Contract linked to Apex REST tests
   const parsed = contracts.parse(OPENAPI_YAML);
@@ -362,6 +472,11 @@ async function seed({ log = console.log, reset = false } = {}) {
   cloneHistory(r2, [1, 3, 5, 8, 10], () => null);
   const r3 = await execute(p3, (t) => !checkOperation(p3, t, {}), { label: 'Post-release smoke (read-only)', trigger: 'manual', user: 'release.manager' });
   log(`  ${r2.id}: ${r2.passed}/${r2.total} passed · ${r3.id}: ${r3.passed}/${r3.total} passed (read-only).`);
+
+  log('Executing the Northwind Retail (Development) suite…');
+  const r4 = await execute(p5, null, { label: 'Dev sprint smoke', trigger: 'manual', user: 'oscar.t' });
+  cloneHistory(r4, [1, 2, 4], () => null);
+  log(`  ${r4.id}: ${r4.passed}/${r4.total} passed.`);
 
   // Defects via the same reviewed-draft path a user would take.
   await createDefectFor(p1, (r) => isDup(r));
