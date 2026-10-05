@@ -48,36 +48,54 @@ function pmExpected(v) {
   return JSON.stringify(v);
 }
 
+/** Chai expression for `actual <op> expected`, mirroring the engine's compare() so exported scripts agree with in-app results. */
+function chaiCheck(g, op, expected) {
+  const lit = pmExpected(expected);
+  const num = `Number(${JSON.stringify(expected)})`;
+  switch (op) {
+    case 'eq': return `pm.expect(${g}).to.eql(${lit});`;
+    case 'neq': return `pm.expect(${g}).to.not.eql(${lit});`;
+    case 'in': return `pm.expect(${g}).to.be.oneOf(${JSON.stringify(expected)});`;
+    case 'exists': return `pm.expect(${g}).to.not.be.oneOf([undefined, null]);`;
+    case 'notExists': return `pm.expect(${g}).to.be.oneOf([undefined, null]);`;
+    case 'contains': return `pm.expect(typeof (${g}) === 'string' ? (${g}) : JSON.stringify(${g})).to.include(${JSON.stringify(String(expected))});`;
+    case 'notContains': return `pm.expect((typeof (${g}) === 'string' ? (${g}) : JSON.stringify(${g})) || '').to.not.include(${JSON.stringify(String(expected))});`;
+    case 'matches': return `pm.expect(String(${g})).to.match(new RegExp(${JSON.stringify(expected)}));`;
+    case 'type': return `pm.expect(Array.isArray(${g}) ? 'array' : (${g} === null ? 'null' : typeof ${g})).to.eql(${JSON.stringify(expected)});`;
+    case 'lt': return `pm.expect(Number(${g})).to.be.below(${num});`;
+    case 'lte': return `pm.expect(Number(${g})).to.be.at.most(${num});`;
+    case 'gt': return `pm.expect(Number(${g})).to.be.above(${num});`;
+    case 'gte': return `pm.expect(Number(${g})).to.be.at.least(${num});`;
+    default: return `throw new Error(${JSON.stringify(`Unsupported operator "${op}"`)});`;
+  }
+}
+
+const JS_CSV = "function qaCsv(t){var rows=[],r=[],c='',q=false,i,ch;t=String(t||'');for(i=0;i<t.length;i++){ch=t[i];if(q){if(ch==='\"'&&t[i+1]==='\"'){c+='\"';i++;}else if(ch==='\"')q=false;else c+=ch;}else if(ch==='\"')q=true;else if(ch===','){r.push(c);c='';}else if(ch==='\\n'||ch==='\\r'){if(ch==='\\r'&&t[i+1]==='\\n')i++;r.push(c);rows.push(r);r=[];c='';}else c+=ch;}if(c!==''||r.length){r.push(c);rows.push(r);}rows=rows.filter(function(x){return x.some(function(y){return y.trim()!=='';});});var h=(rows.shift()||[]).map(function(x){return x.trim();});return {header:h,records:rows.map(function(x){var o={};h.forEach(function(k,j){o[k]=x[j]===undefined?'':x[j];});return o;})};}";
+
 function testScript(tc) {
   const lines = [JS_GET, 'var body; try { body = pm.response.json(); } catch (e) { body = pm.response.text(); }'];
+  if ((tc.assertions || []).some((a) => a.type === 'csv')) lines.splice(1, 0, JS_CSV);
   for (const a of tc.assertions || []) {
     const name = JSON.stringify(a.label || `${a.type} ${a.path || a.name || ''} ${a.op || ''} ${typeof a.expected === 'object' ? '' : a.expected}`.replace(/\s+/g, ' ').trim());
-    const op = a.op || 'eq';
     let check;
     switch (a.type) {
-      case 'status': check = op === 'in' ? `pm.expect(pm.response.code).to.be.oneOf(${JSON.stringify(a.expected)});` : `pm.expect(pm.response.code).to.eql(${JSON.stringify(a.expected)});`; break;
-      case 'responseTime': check = `pm.expect(pm.response.responseTime).to.be.below(${Number(a.expected)});`; break;
-      case 'header': check = op === 'contains' ? `pm.expect(pm.response.headers.get(${JSON.stringify(a.name)}) || '').to.include(${JSON.stringify(a.expected)});` : `pm.expect(pm.response.headers.has(${JSON.stringify(a.name)})).to.be.true;`; break;
-      case 'sfError': check = `pm.expect(Array.isArray(body) && body[0] ? body[0].errorCode : null).to.eql(${JSON.stringify(a.expected)});`; break;
-      case 'schema': check = `pm.response.to.have.jsonSchema(${JSON.stringify(a.expected)});`; break;
-      case 'bodyContains': check = `pm.expect(pm.response.text()).to.include(${JSON.stringify(a.expected)});`; break;
-      case 'jsonpath': {
-        const g = `qaGet(body, ${JSON.stringify(a.path)})`;
-        check = {
-          eq: `pm.expect(${g}).to.eql(${pmExpected(a.expected)});`,
-          neq: `pm.expect(${g}).to.not.eql(${pmExpected(a.expected)});`,
-          in: `pm.expect(${g}).to.be.oneOf(${JSON.stringify(a.expected)});`,
-          exists: `pm.expect(${g}).to.not.be.oneOf([undefined, null]);`,
-          notExists: `pm.expect(${g}).to.be.oneOf([undefined, null]);`,
-          contains: `pm.expect(JSON.stringify(${g})).to.include(${JSON.stringify(String(a.expected))});`,
-          notContains: `pm.expect(JSON.stringify(${g}) || '').to.not.include(${JSON.stringify(String(a.expected))});`,
-          matches: `pm.expect(String(${g})).to.match(new RegExp(${JSON.stringify(a.expected)}));`,
-          type: `pm.expect(Array.isArray(${g}) ? 'array' : (${g} === null ? 'null' : typeof ${g})).to.eql(${JSON.stringify(a.expected)});`,
-          lt: `pm.expect(${g}).to.be.below(${Number(a.expected)});`,
-          gt: `pm.expect(${g}).to.be.above(${Number(a.expected)});`,
-        }[op] || `pm.expect(${g}).to.eql(${pmExpected(a.expected)});`;
+      case 'status': check = chaiCheck('pm.response.code', a.op || 'eq', a.expected); break;
+      case 'responseTime': check = chaiCheck('pm.response.responseTime', a.op || 'lt', a.expected); break;
+      case 'header': {
+        const hv = `pm.response.headers.get(${JSON.stringify(a.name)})`;
+        check = !a.op || a.op === 'exists' ? `pm.expect(pm.response.headers.has(${JSON.stringify(a.name)})).to.be.true;` : a.op === 'notExists' ? `pm.expect(pm.response.headers.has(${JSON.stringify(a.name)})).to.be.false;` : chaiCheck(hv, a.op, a.expected);
         break;
       }
+      case 'sfError': check = chaiCheck("(Array.isArray(body) && body[0] ? (body[0].errorCode || body[0].statusCode || null) : null)", a.op || 'eq', a.expected); break;
+      case 'schema': check = `pm.response.to.have.jsonSchema(${JSON.stringify(a.expected)});`; break;
+      case 'bodyContains': check = `pm.expect(pm.response.text()).to.include(${JSON.stringify(a.expected)});`; break;
+      case 'csv': {
+        const p = String(a.path || 'rows');
+        const g = p === 'rows' ? 'qaCsv(pm.response.text()).records.length' : p === 'header' ? 'qaCsv(pm.response.text()).header' : `qaCsv(pm.response.text()).records.map(function(r){ return r[${JSON.stringify(p.replace(/^column:/, ''))}]; })`;
+        check = chaiCheck(g, a.op || 'eq', a.expected);
+        break;
+      }
+      case 'jsonpath': check = chaiCheck(`qaGet(body, ${JSON.stringify(a.path)})`, a.op || 'eq', a.expected); break;
       default: check = '/* unsupported assertion type */';
     }
     lines.push(`pm.test(${name}, function () { ${check} });`);

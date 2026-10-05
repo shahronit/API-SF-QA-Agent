@@ -156,6 +156,17 @@ async function execute(run, project, testCases, state) {
   setTimeout(() => active.delete(run.id), 5 * 60 * 1000).unref();
 }
 
+const SF_ID = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
+/** Collect ids of records created by a composite/graph response (skips failed sub-responses). */
+function createdIdsFrom(node, out = []) {
+  if (Array.isArray(node)) { for (const x of node) createdIdsFrom(x, out); return out; }
+  if (!node || typeof node !== 'object') return out;
+  if (typeof node.httpStatusCode === 'number' && node.httpStatusCode >= 300) return out;
+  if (typeof node.id === 'string' && SF_ID.test(node.id) && node.success !== false && node.created !== false) out.push(node.id);
+  for (const [k, v] of Object.entries(node)) if (k !== 'id' && v && typeof v === 'object') createdIdsFrom(v, out);
+  return out;
+}
+
 function percentile(arr, p) {
   if (!arr.length) return null;
   const s = [...arr].sort((a, b) => a - b);
@@ -208,7 +219,18 @@ async function executeOne({ tc, base, sf, project, vars, varSource, run, created
   let res;
   const reqRecord = { method: tc.method, url: endpoint, apiType: tc.apiType, auth: tc.auth, headers: maskHeaders(headers), query, body: maskDeep(body !== undefined ? body : bodyRaw) };
   try {
-    res = await sf.request({ method: tc.method, path: endpoint, headers, query, body, bodyRaw, auth: tc.auth, apiType: tc.apiType === 'SOAP' ? 'SOAP' : tc.apiType, timeoutMs: tc.timeoutMs });
+    const reqArgs = { method: tc.method, path: endpoint, headers, query, body, bodyRaw, auth: tc.auth, apiType: tc.apiType === 'SOAP' ? 'SOAP' : tc.apiType, timeoutMs: tc.timeoutMs };
+    res = await sf.request(reqArgs);
+    // Asynchronous Salesforce work (Bulk 2.0 jobs …): tests tagged `poll` re-issue the request until
+    // their assertions pass (up to 15 × 2 s). Live orgs only — the demo simulator answers immediately.
+    if ((tc.tags || []).includes('poll') && project.mode !== 'demo') {
+      for (let i = 0; i < 15; i++) {
+        const interim = evaluate(interpolate(tc.assertions || [], reqVars, new Set()), res);
+        if (!interim.some((a) => a.result === 'FAIL')) break;
+        await new Promise((r) => setTimeout(r, 2000));
+        res = await sf.request(reqArgs);
+      }
+    }
   } catch (e) {
     const ex = e.explanation || { title: e.message, category: 'environment', evidence: [], action: 'Check connectivity.' };
     if (ex.code === 'LOW_PRIVILEGE_USER_NOT_CONFIGURED') return blockedResult({ ...base, request: reqRecord }, ex);
@@ -234,6 +256,13 @@ async function executeOne({ tc, base, sf, project, vars, varSource, run, created
   if (tc.cleanup && res.status < 300) {
     if (tc.cleanup.fromCompositeResponse && Array.isArray(res.body)) {
       for (const x of res.body) if (x && x.success && x.id) created.push({ object: tc.cleanup.object, id: x.id, testCaseId: tc.id });
+    } else if (tc.cleanup.fromResponse) {
+      // Composite / graph responses: every successful (2xx) sub-response that returned a record id.
+      for (const id of createdIdsFrom(res.body)) created.push({ object: tc.cleanup.object, id, testCaseId: tc.id });
+    } else if (tc.cleanup.fromBulkResults) {
+      // Bulk 2.0 successfulResults CSV: rows with sf__Created=true were inserted by this job.
+      const parsed = require('../lib/csv').parse(typeof res.body === 'string' ? res.body : res.text || '');
+      for (const r of parsed.records) if (r.sf__Id && String(r.sf__Created).toLowerCase() === 'true') created.push({ object: tc.cleanup.object, id: r.sf__Id, testCaseId: tc.id });
     } else if (tc.cleanup.idVar && vars[tc.cleanup.idVar] && varSource[tc.cleanup.idVar] && varSource[tc.cleanup.idVar].startsWith(tc.id)) {
       created.push({ object: tc.cleanup.object, id: vars[tc.cleanup.idVar], testCaseId: tc.id });
     }

@@ -4,7 +4,7 @@
   const { h, ic, fmt, on, empty, toast, toastError, withBusy, esc, modal, confirm, json } = QA.ui;
   const C = QA.components;
   const api = QA.api;
-  const CATEGORIES = ['Positive', 'Negative', 'Boundary', 'Integration', 'Regression', 'Performance'];
+  const CATEGORIES = ['Positive', 'Negative', 'Boundary', 'Security', 'Integration', 'Bulk', 'Regression', 'Performance'];
 
   QA.pages.testdata = {
     render(view, ctx) {

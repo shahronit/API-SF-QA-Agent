@@ -14,10 +14,24 @@ function isProduction(project) {
   return String(project.environment || '').toLowerCase() === 'production';
 }
 
-function isModifying({ method, endpoint, path, body }) {
+function isModifying(req) {
+  const { method, endpoint, path, body } = req;
   const m = String(method || 'GET').toUpperCase();
   const p = String(endpoint || path || '');
   if (!WRITE_METHODS.includes(m)) return false;
+  if (m === 'POST' && /\/services\/Soap\//i.test(p)) {
+    // SOAP: login / query / describe / timestamp are reads; any create/update/delete-style call is a write.
+    const raw = String(req.bodyRaw || (typeof body === 'string' ? body : ''));
+    const READ = /<(?:\w+:)?(login|logout|query|queryMore|queryAll|getServerTimestamp|getUserInfo|describeSObject|describeSObjects|describeGlobal)\b/;
+    const WRITE = /<(?:\w+:)?(create|update|upsert|delete|undelete|merge|convertLead|process|sendEmail|setPassword|resetPassword)\b/;
+    if (READ.test(raw) && !WRITE.test(raw)) return false;
+    return true;
+  }
+  if (m === 'POST' && /\/composite(\/batch)?$/i.test(p) && body && typeof body === 'object') {
+    // A composite / batch request made only of GET subrequests does not modify data.
+    const subs = body.compositeRequest || body.batchRequests;
+    if (Array.isArray(subs) && subs.length && subs.every((s) => String(s.method || '').toUpperCase() === 'GET')) return false;
+  }
   if (m === 'POST' && READ_ONLY_POSTS.some((rx) => rx.test(p))) {
     // GraphQL mutations are writes; queries are reads.
     if (/\/graphql$/i.test(p) && body && /\bmutation\b/.test(JSON.stringify(body))) return true;

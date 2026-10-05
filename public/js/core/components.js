@@ -117,7 +117,7 @@
     if (!a && !err) return empty({ icon: 'spark', title: 'No analysis', text: 'Analysis is produced for failed and blocked tests.' });
     const x = a || {};
     return h`<div class="row wrap" style="gap:8px;margin-bottom:10px"><b>${x.category || (err && err.title) || 'Failure'}</b>${prov(x.label)}${x.confidence ? h`<span class="tag">confidence: ${x.confidence}</span>` : ''}</div>
-      ${kv([['Root cause', x.rootCause || (err && err.cause)], ['Evidence', (x.evidence || (err && err.evidence) || []).length ? h`<ul class="list">${[].concat(x.evidence || err.evidence).map((e) => h`<li class="small">${e}</li>`)}</ul>` : null], ['Recommended action', x.action || (err && err.action)]])}`;
+      ${kv([['Classification', x.classification], ['Failure', x.failure], ['Root cause', x.rootCause || (err && err.cause)], ['Evidence', (x.evidence || (err && err.evidence) || []).length ? h`<ul class="list">${[].concat(x.evidence || err.evidence).map((e) => h`<li class="small">${e}</li>`)}</ul>` : null], ['Impact', x.impact], ['Recommendation', x.recommendation || x.action || (err && err.action)], ['Retest', x.retest]])}`;
   }
 
   /** Tabs for a single exchange. Returns { html, bind(el) }. */

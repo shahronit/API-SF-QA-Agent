@@ -11,6 +11,7 @@
 const { prioritise } = require('./priority');
 const { metadataLabel } = require('../connectors');
 const ai = require('./ai');
+const { apiTypeScenarios } = require('./apitypes');
 
 const OPS = {
   create: /\b(create|creat(es|ing)|add|insert|new|register|submit|onboard)\b/i,
@@ -29,6 +30,10 @@ const API_HINTS = [
   ['Apex REST', /\b(apex rest|apexrest|custom endpoint|custom api)\b/i],
   ['SOAP API', /\bsoap\b/i],
   ['Tooling API', /\b(tooling|apex class|validation rule metadata)\b/i],
+  ['Connect REST API', /\b(connect rest|connect api|chatter)\b/i],
+  ['OAuth 2.0', /\b(oauth|connected app|jwt bearer|client credentials|refresh token|token endpoint)\b/i],
+  ['Pagination', /\b(paginat\w*|nextRecordsUrl|query ?more|batch ?size)\b/i],
+  ['Change Data Capture', /\b(change data capture|cdc|\w+ChangeEvent)\b/i],
 ];
 
 const SF_ID_RX = '^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$';
@@ -622,7 +627,14 @@ async function generateSuite({ project, story, sf }) {
     crudScenarios(b, describes[o], analysis, objectFields);
   }
   integrationScenarios(b, analysis);
-  const scenarios = b.finish();
+  apiTypeScenarios(b, analysis, { buildPayload, SF_ID_RX, camel });
+  // Run-scoped unique values ({{runId}}) are only unique *per run*. Two stories on the same object
+  // generate identical keys, so they collide when executed together (e.g. a full regression).
+  // Add a per-generation suffix, applied consistently across every test of this suite, so each
+  // suite owns its data. Cross-test references inside the suite keep working because they all
+  // receive the same suffix.
+  const suffix = require('node:crypto').randomBytes(2).toString('hex');
+  const scenarios = JSON.parse(JSON.stringify(b.finish()).split('{{runId}}').join(`{{runId}}-${suffix}`));
 
   // Optional AI augmentation — only adds RECOMMENDED ideas, never executable "facts".
   if (ai.enabled()) {

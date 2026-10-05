@@ -161,7 +161,8 @@ route('GET', '/api/search', async (ctx) => {
   const like = `%${q.slice(0, 80)}%`;
   const pid = ctx.query.projectId || null;
   const pf = pid ? 'AND projectId = $p' : '';
-  const params = { q: like, p: pid };
+  // node:sqlite rejects named parameters the statement does not reference, so only bind $p when it is used.
+  const params = pid ? { q: like, p: pid } : { q: like };
   const groups = [
     { type: 'story', label: 'Jira stories', items: all(`SELECT key AS id, summary AS title, projectId, status AS meta FROM stories WHERE (key LIKE $q OR summary LIKE $q) ${pf} LIMIT 6`, params) },
     { type: 'testcase', label: 'Test cases', items: all(`SELECT id, title, projectId, priority || ' · ' || testType AS meta FROM test_cases WHERE (id LIKE $q OR title LIKE $q OR endpoint LIKE $q) ${pf} LIMIT 8`, params) },

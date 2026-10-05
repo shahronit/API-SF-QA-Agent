@@ -123,3 +123,44 @@ test('generation produces a proposal that is not saved until approved', async ()
   const mid = (await api('GET', '/api/testcases?projectId=PRJ-001&pageSize=1')).body.total;
   assert.equal(mid, before);
 });
+
+test('global search works with and without a project filter', async () => {
+  const all = await api('GET', '/api/search?q=acme');
+  assert.equal(all.status, 200, all.text.slice(0, 200));
+  const scoped = await api('GET', '/api/search?q=acme&projectId=PRJ-001');
+  assert.equal(scoped.status, 200, scoped.text.slice(0, 200));
+});
+
+test('test-data generation covers every plan category without persisting secrets', async () => {
+  for (const category of ['Positive', 'Negative', 'Boundary', 'Security', 'Integration', 'Bulk', 'Regression', 'Performance']) {
+    const r = await api('POST', '/api/testdata/generate', { projectId: 'PRJ-001', object: 'Contact', category, count: 2 });
+    assert.equal(r.status, 200, `${category}: ${r.text.slice(0, 200)}`);
+    assert.equal(r.body.items[0].category, category);
+    if (category === 'Bulk') assert.ok(r.body.items[0].payload.records && Array.isArray(r.body.items[0].payload.columns));
+    if (category === 'Security') assert.match(r.body.items[0].notes, /verbatim|rejected/);
+  }
+});
+
+test('run reports expose classification, impact, retest, risks and automation assets', async () => {
+  const runs = (await api('GET', '/api/runs?projectId=PRJ-001&pageSize=50')).body.items;
+  let report;
+  for (const run of runs) {
+    const r = await api('GET', `/api/reports/${run.id}`);
+    if (r.status === 200 && r.body.failed && r.body.failed.length) { report = r.body; break; }
+  }
+  assert.ok(report, 'a seeded run with failures exists');
+  assert.ok(Array.isArray(report.risks) && report.risks.length, 'risks are reported');
+  assert.ok(report.automationAssets.postmanCollection.url && report.automationAssets.newmanCommand && report.automationAssets.tests.total > 0, 'automation assets are listed');
+  const f = report.failed[0];
+  assert.ok(f.classification && f.impact && f.retest, 'every failure carries classification, impact and retest');
+  assert.ok(!/Bearer\s+[A-Za-z0-9._-]{12,}/.test(JSON.stringify(report)), 'report is masked');
+  for (const format of ['json', 'csv', 'html', 'xlsx', 'pdf']) {
+    const res = await fetch(`${BASE}/api/reports/${report.run.id}?format=${format}`);
+    assert.equal(res.status, 200, `${format} export`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    assert.ok(buf.length > 100, `${format} export is not empty`);
+    if (format === 'pdf') assert.equal(buf.subarray(0, 4).toString(), '%PDF');
+    if (format === 'xlsx') assert.equal(buf.subarray(0, 2).toString(), 'PK');
+    if (format === 'html') assert.match(buf.toString(), /Risks/);
+  }
+});

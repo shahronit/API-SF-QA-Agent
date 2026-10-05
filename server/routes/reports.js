@@ -217,9 +217,13 @@ route('POST', '/api/agent/command', async (ctx) => {
       return reply('Discover', `${storyKey} does not look like it needs API testing: ${cls.reasons.join(' ')} Say "Analyze ${storyKey} anyway" if you want scenarios proposed regardless.`, { data: { classification: cls }, examples: [`Analyze ${storyKey} anyway`] });
     }
     const { analysis, scenarios } = await generateSuite({ project: p, story, sf: salesforceFor(p) });
+    const n = scenarios.reduce((s, x) => s + x.testCases.length, 0);
+    if (n === 0) {
+      const why = analysis.objects.length ? `Objects found (${analysis.objects.join(', ')}) but no testable operations or API types were detected.` : 'No Salesforce object or API type could be identified in the story.';
+      return reply('Generate', `Analysed ${storyKey} but could not propose any test cases. ${why} ${analysis.notes.map((x) => x.text).join(' ')} Name the object and the operation (for example "create a Contact via REST") in the story or ask: "Generate negative tests for the Account API".`.replace(/\s+/g, ' ').trim(), { data: { classification: cls, gaps: analysis.gaps } });
+    }
     const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey, status: 'proposed', analysis: { ...analysis, classification: cls }, scenarios, createdBy: ctx.user, createdAt: now() };
     repo.insert('proposals', proposal);
-    const n = scenarios.reduce((s, x) => s + x.testCases.length, 0);
     const clsNote = cls.needsApiTesting ? '' : ' Note: this ticket may not need API testing — review carefully before approving.';
     return reply('Generate', `Analysed ${storyKey}: ${analysis.objects.join(', ') || 'no objects'} · operations ${analysis.operations.join(', ') || 'none detected'}. Proposed ${scenarios.length} scenarios / ${n} test cases (metadata ${analysis.metadataLabel}).${clsNote} Review and approve before anything is saved or sent to Jira.`, { navigate: `/stories/${storyKey}?proposal=${proposal.id}`, proposalId: proposal.id, data: { classification: cls } });
   }
@@ -247,6 +251,9 @@ route('POST', '/api/agent/command', async (ctx) => {
     const story = { key: `${p.jiraProjectKey || 'ADHOC'}-0`, summary: `${objMatch} API ${type.toLowerCase()} coverage`, description: `Create, update and query ${objMatch} records through the Salesforce API. Invalid input must be rejected.`, acceptanceCriteria: '' };
     const { analysis, scenarios } = await generateSuite({ project: p, story, sf: salesforceFor(p) });
     const filtered = scenarios.filter((s) => s.type === type);
+    if (!filtered.length) {
+      return reply('Generate', `No ${type} tests could be generated for ${objMatch}${p.environment === 'Production' ? ' — Production projects only receive read-only coverage' : ''}. Available scenario types for this object: ${[...new Set(scenarios.map((s) => s.type))].join(', ') || 'none'}.`, { data: { gaps: analysis.gaps } });
+    }
     const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: 'AD-HOC', status: 'proposed', analysis: { ...analysis, storyKey: 'AD-HOC', summary: story.summary }, scenarios: filtered, createdBy: ctx.user, createdAt: now() };
     repo.insert('proposals', proposal);
     return reply('Generate', `Proposed ${filtered.reduce((n, s) => n + s.testCases.length, 0)} ${type} tests for ${objMatch} (metadata ${analysis.metadataLabel}). Review and approve to add them.`, { navigate: `/generate/${proposal.id}`, proposalId: proposal.id });

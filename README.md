@@ -76,6 +76,33 @@ docs/              API reference and UI snapshots
 
 REST, SOAP (partner/enterprise and Apex SOAP), Bulk API and Bulk API 2.0, Composite, Composite Graph, sObject Collections, GraphQL, Tooling, Metadata, Connect REST, Apex REST, Platform Events, Change Data Capture (via Pub/Sub API guidance), OAuth endpoints, and custom integration APIs configured per project. The API explorer has a template for each.
 
+### Coverage by API family
+
+Story text selects the API families to test; each generates executable cases (all labelled ASSUMED in demo mode, VERIFIED only from a live describe):
+
+| Family | Generated coverage |
+|---|---|
+| REST / sObject | CRUD, negative, boundary, FLS/low-privilege, upsert insert/update idempotency, pagination (`nextRecordsUrl`, consumed locator) |
+| Bulk API 2.0 | Job lifecycle (create, CSV upload, close, poll, `successfulResults` / `failedResults` / `unprocessedrecords`), partial-success CSV, wrong `Content-Type` (415), abort, upsert idempotency, per-record cleanup (`cleanup.fromBulkResults`) |
+| Composite / Graph / Collections | `allOrNone` rollback with `PROCESSING_HALTED`, reference resolution, 25-subrequest limit, duplicate `referenceId`, 200/201-record collections |
+| GraphQL | UI API query shape, filters, `first`/`after` paging, validation errors, FLS-hidden fields |
+| SOAP / Tooling | login, query, `getServerTimestamp`, `INVALID_SESSION_ID` fault (HTTP 500), `INVALID_FIELD`, Tooling `INVALID_TYPE` / `MALFORMED_QUERY` |
+| OAuth / Connect / Platform Events | grant-type and client validation, `userinfo`, Chatter current user, event publish with and without required fields (subscriber delivery is flagged as not verifiable over REST) |
+
+Assertion types: `status`, `jsonpath`, `header`, `responseTime`, `sfError`, `schema`, `bodyContains` and `csv` (`rows`, `header`, `column:<name>`). Tests tagged `poll` are retried on live orgs until their assertions pass (async Bulk jobs). Run-scoped values (`{{runId}}`) get a per-generation suffix so two stories on one object never collide in a combined regression run. Cleanup supports `idVar`, `fromResponse`, `fromCompositeResponse` and `fromBulkResults`.
+
+### Failure analysis
+
+Every failure is classified into one of the plan's eleven classes — Test Data, Authentication, Authorization, API Contract, Salesforce Configuration, Salesforce Automation, Integration, Application Defect, Environment, Performance, External Dependency — and carries failure, evidence, root cause, impact, recommendation and retest steps. Policy blocks (for example production write protection) are not failures. Reports (JSON, CSV, HTML, XLSX, PDF) include a Risks section and the Postman/Newman automation assets.
+
+### Test data categories
+
+Positive, Negative, Boundary, Security (hostile string probes), Integration, Bulk (CSV template), Regression and Performance.
+
+### Simulator fidelity
+
+The demo simulator follows real Salesforce semantics for the families above (Bulk 2.0 per-record results, composite rollback, GraphQL validation, SOAP faults as HTTP 500). Intentional differences: Bulk `batchSize` is accepted from 1 to 2000 (real orgs clamp to 200–2000), and nothing here replaces a run against a real org.
+
 ## Notes and limits
 
 The Express/React stack in the original brief was replaced by built-in Node modules and a framework-free front end because the package registry was not reachable from the build environment; the API surface and features are the same. Newman is the only optional dependency and lives in `api-tests/package.json`. The demo simulator implements a realistic subset of Salesforce behaviour; anything it reports is labelled ASSUMED until re-run against a live org.

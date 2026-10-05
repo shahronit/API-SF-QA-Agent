@@ -155,10 +155,12 @@
             <div class="card"><div class="card-head"><h2>Failures and root causes</h2><span class="small muted">Defects are never created automatically — preview and confirm each one.</span></div>
               <div class="card-body flush">${a.failures.map((f) => h`<div style="padding:14px 18px;border-bottom:1px solid var(--border)">
                 <div class="row wrap" style="gap:8px">${badge(f.status)}<b>${f.title}</b><span class="spacer"></span>${f.defectKey ? h`<a class="badge Open plain" href="/defects?q=${f.defectKey}" data-link>${f.defectKey}</a>` : f.status === 'failed' ? h`<button class="btn sm" data-defect="${f.resultId}">${ic('bug')} Preview Jira defect</button>` : ''}<button class="btn sm ghost" data-open="${f.resultId}">Details</button></div>
-                ${f.analysis ? h`<div class="row wrap small mt-s" style="gap:8px"><span class="tag">${f.analysis.category}</span>${QA.ui.prov(f.analysis.label)}<span class="muted">confidence ${f.analysis.confidence}</span>${f.statusCode ? h`<span class="muted">HTTP ${f.statusCode}</span>` : ''}</div>
+                ${f.analysis ? h`<div class="row wrap small mt-s" style="gap:8px">${f.analysis.classification ? h`<span class="tag" title="Failure classification">${f.analysis.classification}</span>` : ''}<span class="tag">${f.analysis.category}</span>${QA.ui.prov(f.analysis.label)}<span class="muted">confidence ${f.analysis.confidence}</span>${f.statusCode ? h`<span class="muted">HTTP ${f.statusCode}</span>` : ''}</div>
                 <p class="small" style="margin:8px 0 4px">${f.analysis.rootCause}</p>
                 ${f.analysis.evidence && f.analysis.evidence.length ? h`<ul class="list small muted" style="margin:0 0 6px">${f.analysis.evidence.slice(0, 4).map((x) => h`<li>${x}</li>`)}</ul>` : ''}
-                <p class="small" style="margin:0"><b>Recommended action:</b> ${f.analysis.action}</p>` : ''}
+                <p class="small" style="margin:0 0 4px"><b>Impact:</b> ${f.analysis.impact || ''}</p>
+                <p class="small" style="margin:0 0 4px"><b>Recommendation:</b> ${f.analysis.recommendation || f.analysis.action}</p>
+                <p class="small" style="margin:0"><b>Retest:</b> ${f.analysis.retest || ''}</p>` : ''}
               </div>`)}</div></div>
             <div class="stack">
               <div class="card"><div class="card-head"><h2>Failure categories</h2></div><div class="card-body">${QA.charts.hbars ? raw(QA.charts.hbars({ items: a.categories.map((c) => ({ label: c.category, value: c.count, color: '--error' })) })) : ''}</div></div>
