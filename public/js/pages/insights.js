@@ -11,7 +11,8 @@
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Insights' }]);
       let threshold = Number(ctx.query.failureRate || 10);
-      view.innerHTML = String(h`${C.pageHead('Insights', 'Where quality risk concentrates: unstable endpoints, redundant tests and missing coverage. Items marked RECOMMENDED need a human decision.')}
+      view.innerHTML = String(h`${C.pageHead('Insights', 'Where risk piles up: endpoints that fail often, duplicate tests, and coverage gaps. Items marked RECOMMENDED need a person to decide.')}
+        ${C.pageIntro({ what: 'Suggestions from recent runs — not a live Salesforce query.', next: 'Raise the failure-rate threshold if the list is noisy. Follow a row into Tests or Try an API. Do not treat RECOMMENDED items as facts.' })}
         <div class="card" style="margin-bottom:16px"><div class="toolbar"><label class="small" for="thr">Show APIs with failure rate above</label><select class="select" id="thr" data-thr>${[0, 5, 10, 25, 50].map((t) => h`<option value="${t}" ${t === threshold ? 'selected' : ''}>${t}%</option>`)}</select></div></div><div data-body>${loading(8)}</div>`);
       const body = view.querySelector('[data-body]');
       async function load() {

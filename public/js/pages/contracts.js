@@ -10,7 +10,8 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Contracts' }]);
-      view.innerHTML = String(h`${C.pageHead('API contracts', 'Validate responses against OpenAPI 3, Swagger 2 or JSON Schema: required fields, types, enums, formats, status codes and headers.', h`<button class="btn primary" data-act="upload">${ic('upload')} Upload contract</button>`)}
+      view.innerHTML = String(h`${C.pageHead('API contracts', 'Check responses against an OpenAPI, Swagger or JSON Schema file — required fields, types, enums and status codes.', h`<button class="btn primary" data-act="upload">${ic('upload')} Upload a contract</button>`)}
+        ${C.pageIntro({ what: 'Optional. Upload a spec so runs can flag responses that drift from the contract.', next: 'Upload an OpenAPI 3, Swagger 2 or JSON Schema file, then attach it when you review tests.' })}
         <div class="grid g-12"><div class="card" style="align-self:start" data-list>${loading(4)}</div><div data-detail>${'' }</div></div>`);
       let list = [];
       let current = null;

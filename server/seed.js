@@ -98,6 +98,9 @@ const STORIES = [
   { key: 'NWR-402', projectKey: 'NWR', summary: 'Create wholesale Account and primary Contact via API', priority: 'Medium', sprint: 'Wave 3', status: 'Ready for QA', components: ['Onboarding'], assignee: 'Oscar T.',
     description: 'As the partner onboarding team, I want new wholesale distributor Accounts and their primary Contact created through the Salesforce REST API from the partner signup portal, so new distributors can start placing orders the same day.',
     acceptanceCriteria: '- A valid Account with Name returns 201\n- The primary Contact can be created and linked to the Account\n- Missing the Account Name is rejected with REQUIRED_FIELD_MISSING' },
+  { key: 'GLX-501', projectKey: 'GLX', summary: 'Shopper product catalog and search via Commerce Cloud OCAPI and SCAPI', priority: 'High', sprint: 'Storefront 8', status: 'In QA', components: ['Storefront', 'Catalog'], assignee: 'Nina V.',
+    description: 'As the storefront API consumer, I want product get and product search available through Commerce Cloud OCAPI Shop and the Shopper API (SCAPI) so the B2C storefront can render PDP and PLP without calling Business Manager.\n\nCoverage includes an unknown product id (404), unauthenticated calls, and a guest basket add-to-cart on OCAPI.',
+    acceptanceCriteria: '- GET product by id returns 200 with id and price\n- Product search returns hits\n- Unknown product id returns 404\n- Unauthenticated product GET is rejected\n- Guest basket can be created and a known product added' },
 ];
 
 const OPENAPI_YAML = `openapi: 3.0.3
@@ -218,7 +221,8 @@ components:
 
 function resetDb() {
   db.exec(`DELETE FROM audit_log; DELETE FROM run_results; DELETE FROM runs; DELETE FROM defects; DELETE FROM test_cases; DELETE FROM scenarios;
-    DELETE FROM proposals; DELETE FROM stories; DELETE FROM test_data; DELETE FROM saved_requests; DELETE FROM contracts; DELETE FROM demo_jira; DELETE FROM projects; DELETE FROM counters;`);
+    DELETE FROM proposals; DELETE FROM stories; DELETE FROM test_data; DELETE FROM saved_requests; DELETE FROM contracts; DELETE FROM demo_jira;
+    DELETE FROM collection_proposals; DELETE FROM collections; DELETE FROM workflow_state; DELETE FROM projects; DELETE FROM counters;`);
 }
 
 function insertProjects() {
@@ -245,9 +249,14 @@ function insertProjects() {
       integrationConfig: { middleware: 'Platform Events (native)', externalSystems: ['Warehouse management system', 'Carrier booking service'], endpoints: [] },
       notificationConfig: { onRunComplete: 'none' },
       businessConfig: { slaMs: 2000, criticalObjects: ['Account'], highTrafficObjects: [] } },
+    { ...base, id: 'PRJ-006', name: 'Globex B2C Commerce Cloud', description: 'B2C storefront APIs — OCAPI Shop and SCAPI Shopper (products, search, baskets) against a demo Commerce Cloud simulator.', sfOrg: 'globex-cc', environment: 'QA', instanceUrl: 'https://globex--qa.sandbox.my.salesforce.com', mode: 'demo', credentialRef: 'GLOBEX_CC', jiraProjectKey: 'GLX', jiraUrl: 'https://demo-jira.local',
+      testDataConfig: { autoCleanup: true, variables: { siteId: 'RefArch', orgId: 'f_ecom_zzte_001' } },
+      integrationConfig: { commerce: { enabled: true, host: 'demo-commerce.example.com', siteId: 'RefArch', orgId: 'f_ecom_zzte_001', shortCode: 'demo', ocapiVersion: 'v24_5', sampleProductId: 'apple-iphone-15', credentialRef: 'GLOBEX_CC' }, endpoints: [] },
+      notificationConfig: { onRunComplete: 'none' },
+      businessConfig: { slaMs: 2000, criticalObjects: [] } },
   ];
   for (const p of projects) repo.insert('projects', p);
-  sqlRun("INSERT OR REPLACE INTO counters (name, value) VALUES ('PRJ', 5)");
+  sqlRun("INSERT OR REPLACE INTO counters (name, value) VALUES ('PRJ', 6)");
   return projects;
 }
 
@@ -379,8 +388,8 @@ async function seed({ log = console.log, reset = false } = {}) {
   const t0 = Date.now();
   const projects = insertProjects();
   insertJira();
-  const [p1, p2, p3, , p5] = projects;
-  for (const p of [p1, p2, p3, p5]) await syncStories(p);
+  const [p1, p2, p3, , p5, p6] = projects;
+  for (const p of [p1, p2, p3, p5, p6].filter(Boolean)) await syncStories(p);
   log('Projects and Jira stories created.');
 
   let n = 0;
@@ -443,7 +452,8 @@ async function seed({ log = console.log, reset = false } = {}) {
       assertions: [{ type: 'status', op: 'eq', expected: 401 }, { type: 'sfError', op: 'eq', expected: 'INVALID_SESSION_ID' }], testType: 'Security', tags: ['authentication', 'platform-events'],
     },
   ], 1000);
-  log(`Generated and approved ${n} test cases across 13 stories.`);
+  if (p6) n += await generateAndApprove(p6, 'GLX-501', 1000);
+  log(`Generated and approved ${n} test cases across seeded stories.`);
 
   // Contract linked to Apex REST tests
   const parsed = contracts.parse(OPENAPI_YAML);
@@ -477,6 +487,12 @@ async function seed({ log = console.log, reset = false } = {}) {
   const r4 = await execute(p5, null, { label: 'Dev sprint smoke', trigger: 'manual', user: 'oscar.t' });
   cloneHistory(r4, [1, 2, 4], () => null);
   log(`  ${r4.id}: ${r4.passed}/${r4.total} passed.`);
+
+  if (p6) {
+    log('Executing Globex B2C Commerce Cloud (demo storefront)…');
+    const r6 = await execute(p6, null, { label: 'Storefront API smoke', trigger: 'manual', user: 'nina.v' });
+    log(`  ${r6.id}: ${r6.passed}/${r6.total} passed.`);
+  }
 
   // Defects via the same reviewed-draft path a user would take.
   await createDefectFor(p1, (r) => isDup(r));

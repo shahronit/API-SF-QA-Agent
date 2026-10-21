@@ -6,8 +6,9 @@
  */
 const { EventEmitter } = require('node:events');
 const crypto = require('node:crypto');
-const { repo, now, nextId, audit, all } = require('../db');
-const { salesforceFor } = require('../connectors');
+const { repo, now, nextId, audit, all, get } = require('../db');
+const { salesforceFor, commerceFor, connectorFor, isCommerceRequest, isHttpRequest, httpFor, postmanFor } = require('../connectors');
+const { restApiOrigin, ensureSalesforceRestPath } = require('../connectors/salesforce-org');
 const { interpolate } = require('../lib/template');
 const { maskDeep, maskHeaders, maskText } = require('../lib/mask');
 const { explainResponse } = require('../lib/errors');
@@ -59,6 +60,7 @@ function startRun({ project, testCases, user, options = {} }) {
   };
   repo.insert('runs', run);
   audit('execution', 'run.started', { user, projectId: project.id, detail: { runId: id, total: run.total, trigger: run.trigger, environment: project.environment } });
+  try { require('./workflow').touch(project.id, 'execute', 'in_progress', { runId: id }); } catch { /* non-fatal */ }
   const emitter = new EventEmitter();
   emitter.setMaxListeners(50);
   const state = { emitter, stopRequested: false, done: false };
@@ -74,10 +76,30 @@ function startRun({ project, testCases, user, options = {} }) {
 
 async function execute(run, project, testCases, state) {
   const sf = salesforceFor(project);
+  const commerce = commerceFor(project);
   const emit = (e) => state.emitter.emit('event', { runId: run.id, ...e });
+  const cc = (project.integrationConfig && project.integrationConfig.commerce) || {};
+  const httpCfg = (project.integrationConfig && project.integrationConfig.http) || {};
+  const userVars = { ...(((project.testDataConfig || {}).variables) || {}) };
+  const looksLikeSfId = (v) => /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(String(v || ''));
+  if (userVars.siteId && !looksLikeSfId(userVars.siteId)) {
+    userVars.ccSiteId = userVars.ccSiteId || userVars.siteId;
+    delete userVars.siteId;
+  }
+  if (userVars.orgId && !looksLikeSfId(userVars.orgId) && !/^00D/i.test(String(userVars.orgId))) {
+    userVars.ccOrgId = userVars.ccOrgId || userVars.orgId;
+    delete userVars.orgId;
+  }
   const vars = {
-    apiVersion: project.apiVersion, runId: run.id.slice(-6), instanceUrl: project.instanceUrl || '', environment: project.environment,
-    ...(((project.testDataConfig || {}).variables) || {}),
+    apiVersion: project.apiVersion, runId: run.id.slice(-6),
+    instanceUrl: restApiOrigin(project.instanceUrl) || project.instanceUrl || '',
+    environment: project.environment,
+    ccSiteId: cc.siteId || userVars.ccSiteId || (project.mode === 'demo' ? 'RefArch' : ''),
+    ccOrgId: cc.orgId || userVars.ccOrgId || '',
+    ccShortCode: cc.shortCode || userVars.ccShortCode || userVars.shortCode || '',
+    ocapiVersion: cc.ocapiVersion || 'v24_5',
+    httpBaseUrl: String(httpCfg.baseUrl || '').replace(/\/$/, ''),
+    ...userVars,
   };
   const varSource = {}; // var -> testCase id that produced it
   const counts = { passed: 0, failed: 0, blocked: 0, skipped: 0, apiErrors: 0, sfErrors: 0 };
@@ -86,8 +108,42 @@ async function execute(run, project, testCases, state) {
   const contractCache = {};
   emit({ type: 'run-start', total: testCases.length, environment: project.environment, demo: project.mode === 'demo' });
 
-  if (!sf.available) {
+  const pm = postmanFor(project);
+  const usePostmanMcp = pm.canExecute && project.mode !== 'demo';
+  if (usePostmanMcp) {
+    try {
+      await executeViaPostman({ run, project, testCases, state, pm, emit, counts, timings, created });
+      await finishRun(run, project, testCases, state, { emit, counts, timings, created, sf });
+      return;
+    } catch (e) {
+      const started = get('SELECT COUNT(*) AS n FROM run_results WHERE runId = $r', { r: run.id }).n;
+      emit({
+        type: 'notice',
+        level: 'warning',
+        message: `Postman MCP could not run this collection (${(e.explanation && e.explanation.title) || e.message}).${started ? ' Results already recorded from Postman are kept.' : ' Falling back to the platform runner.'}`,
+      });
+      if (started) {
+        await finishRun(run, project, testCases, state, { emit, counts, timings, created, sf });
+        return;
+      }
+    }
+  } else if (project.mode !== 'demo' && (pm.settings.url || pm.settings.command || pm.settings.apiKeyPresent)) {
+    emit({
+      type: 'notice',
+      level: 'warning',
+      message: 'Postman MCP is configured but not reachable. Running tests in the platform instead. Test Postman on Connections, then retry.',
+    });
+  }
+
+  if (!sf.available && testCases.some((t) => !isCommerceRequest(t) && !isHttpRequest(t))) {
     emit({ type: 'notice', level: 'warning', message: require('../config').SF_UNAVAILABLE_MESSAGE });
+  }
+  if (!commerce.available && testCases.some((t) => isCommerceRequest(t))) {
+    emit({ type: 'notice', level: 'warning', message: commerce.unavailableExplanation().title });
+  }
+  const http = httpFor(project);
+  if (!http.available && testCases.some((t) => isHttpRequest(t) && !/^https?:\/\//i.test(String(t.endpoint || '')))) {
+    emit({ type: 'notice', level: 'warning', message: http.unavailableExplanation().title });
   }
 
   for (let i = 0; i < testCases.length; i++) {
@@ -105,7 +161,7 @@ async function execute(run, project, testCases, state) {
       continue;
     }
     emit({ type: 'test-start', index: i, testCaseId: tc.id, title: tc.title });
-    const r = await executeOne({ tc, base, sf, project, vars, varSource, run, created, contractCache });
+    const r = await executeOne({ tc, base, sf: connectorFor(project, tc), project, vars, varSource, run, created, contractCache });
     if (r.responseMs) timings.push(r.responseMs);
     counts[r.status === 'passed' ? 'passed' : r.status === 'failed' ? 'failed' : r.status === 'blocked' ? 'blocked' : 'skipped']++;
     if (r.error && r.error.category && ['environment', 'configuration', 'authentication'].includes(r.error.category)) counts.apiErrors++;
@@ -118,7 +174,48 @@ async function execute(run, project, testCases, state) {
     emit({ type: 'test-result', index: i, result: slim(r), counts });
   }
 
-  // Cleanup test data (never in production).
+  await finishRun(run, project, testCases, state, { emit, counts, timings, created, sf });
+}
+
+async function executeViaPostman({ run, project, testCases, state, pm, emit, counts, timings, created }) {
+  emit({ type: 'notice', level: 'info', message: 'Executing via Postman MCP.' });
+  let accessToken;
+  try {
+    const sf = salesforceFor(project);
+    if (typeof sf.token === 'function' && sf.available) {
+      const t = await sf.token();
+      accessToken = t && t.accessToken;
+    }
+  } catch { /* collection prerequest / Postman env may still authenticate */ }
+  const mcp = await pm.runApproved(testCases, { accessToken, runId: run.id });
+  accessToken = undefined;
+  repo.update('runs', run.id, { options: { ...(run.options || {}), executor: 'postman-mcp', collectionId: mcp.collectionId || null } });
+  for (let i = 0; i < testCases.length; i++) {
+    const tc = testCases[i];
+    const resultId = `${run.id}-${String(i + 1).padStart(4, '0')}`;
+    const base = {
+      id: resultId, runId: run.id, projectId: project.id, testCaseId: tc.id, seq: i + 1, title: tc.title, method: tc.method,
+      endpoint: tc.endpoint, apiType: tc.apiType, testType: tc.testType, priority: tc.priority, storyKey: tc.storyKey, startedAt: now(),
+    };
+    emit({ type: 'test-start', index: i, testCaseId: tc.id, title: tc.title });
+    const mapped = (mcp.results && mcp.results[i]) || {
+      status: 'blocked',
+      error: { title: 'Postman MCP did not return a result for this test.', category: 'environment' },
+      assertions: [],
+    };
+    const r = { ...base, ...mapped, endedAt: now() };
+    r.analysis = analyse(r, tc);
+    if (r.responseMs) timings.push(r.responseMs);
+    counts[r.status === 'passed' ? 'passed' : r.status === 'failed' ? 'failed' : r.status === 'blocked' ? 'blocked' : 'skipped']++;
+    if (r.error && r.error.category && ['environment', 'configuration', 'authentication'].includes(r.error.category)) counts.apiErrors++;
+    repo.insert('run_results', r);
+    repo.update('test_cases', tc.id, { lastRunAt: r.endedAt, lastResult: r.status, lastResponseMs: r.responseMs || null });
+    repo.update('runs', run.id, { ...counts });
+    emit({ type: 'test-result', index: i, result: slim(r), counts });
+  }
+}
+
+async function finishRun(run, project, testCases, state, { emit, counts, timings, created, sf }) {
   const cleanup = { attempted: 0, deleted: 0, errors: [] };
   const autoCleanup = ((project.testDataConfig || {}).autoCleanup) !== false;
   if (created.length && autoCleanup && !isProduction(project) && sf.available) {
@@ -151,6 +248,13 @@ async function execute(run, project, testCases, state) {
   const avg = timings.length ? Math.round(timings.reduce((a, b) => a + b, 0) / timings.length) : null;
   repo.update('runs', run.id, { ...counts, status: finalStatus, endedAt: now(), avgResponseMs: avg, summary, createdRecords: created.slice(0, 500) });
   audit('execution', 'run.finished', { user: run.user, projectId: project.id, detail: { runId: run.id, status: finalStatus, ...counts } });
+  try {
+    const wf = require('./workflow');
+    wf.touch(project.id, 'execute', finalStatus === 'completed' ? 'completed' : 'failed', { runId: run.id, ...counts });
+    wf.touch(project.id, 'validate', counts.sfErrors ? 'failed' : 'completed', { sfErrors: counts.sfErrors });
+    wf.touch(project.id, 'analysis', 'completed', { failed: counts.failed });
+    wf.touch(project.id, 'report', 'completed', { runId: run.id });
+  } catch { /* non-fatal */ }
   state.done = true;
   emit({ type: 'run-end', status: finalStatus, counts, avgResponseMs: avg, cleanup });
   setTimeout(() => active.delete(run.id), 5 * 60 * 1000).unref();
@@ -201,7 +305,10 @@ async function executeOne({ tc, base, sf, project, vars, varSource, run, created
   const body = tc.bodyRaw ? undefined : interpolate(tc.body, vars, missing);
   const bodyRaw = tc.bodyRaw ? interpolate(tc.bodyRaw, vars, missing) : undefined;
   const reqVars = { ...vars, req: body && typeof body === 'object' ? body : {} };
-  const endpoint = interpolate(tc.endpoint, reqVars, missing);
+  let endpoint = interpolate(tc.endpoint, reqVars, missing);
+  if (!isCommerceRequest({ ...tc, endpoint }) && !isHttpRequest({ ...tc, endpoint })) {
+    endpoint = ensureSalesforceRestPath(endpoint, vars.apiVersion || project.apiVersion);
+  }
   const headers = interpolate(tc.headers || {}, reqVars, missing);
   const query = interpolate(tc.query || {}, reqVars, missing);
   const unresolved = [...missing].filter((m) => !m.startsWith('$') && m !== 'accessToken' && m !== 'sessionId');
@@ -213,7 +320,7 @@ async function executeOne({ tc, base, sf, project, vars, varSource, run, created
       action: 'Run the full suite (or include the upstream test) and fix the upstream failure first.', category: 'dependency', evidence: producers,
     });
   }
-  if (!sf.available) return blockedResult(base, { ...sf.unavailableExplanation(), category: 'configuration' });
+  if (!sf.available && !/^https?:\/\//i.test(endpoint)) return blockedResult(base, { ...sf.unavailableExplanation(), category: 'configuration' });
 
   // 4. Execute
   let res;

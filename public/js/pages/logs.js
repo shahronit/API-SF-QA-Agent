@@ -11,7 +11,9 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Audit log' }]);
-      view.innerHTML = String(h`${C.pageHead('Audit log', 'Every execution, Jira write, production confirmation, export and configuration change. Details are masked; correlation ids link to Salesforce request logs.')}<div data-list></div>`);
+      view.innerHTML = String(h`${C.pageHead('Audit log', 'Who did what, when — runs, Jira writes, production confirmations, exports and config changes. Details are masked.')}
+        ${C.pageIntro({ what: 'A read-only trail for this project. Use it when you need to explain a change or a production confirmation.', next: 'Filter by category or search for a user, action or id. Nothing on this screen can change Salesforce or Jira.' })}
+        <div data-list></div>`);
       C.listController(view.querySelector('[data-list]'), {
         sort: 'ts', dir: 'DESC', searchPlaceholder: 'Search action, user or detail', pageSize: 50, filters: { category: ctx.query.category || '' },
         toolbar: (s) => h`<select class="select" data-filter="category" aria-label="Category"><option value="">All categories</option>${CATS.map((c) => h`<option ${s.filters.category === c ? 'selected' : ''}>${c}</option>`)}</select>`,

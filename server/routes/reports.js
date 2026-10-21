@@ -8,12 +8,14 @@ const { config } = require('../config');
 const reports = require('../engine/reports');
 const postman = require('../engine/postman');
 const runner = require('../engine/runner');
-const { salesforceFor } = require('../connectors');
+const { salesforceFor, connectorFor } = require('../connectors');
 const { generateSuite } = require('../engine/generator');
+const { proposeSuite } = require('./stories');
 const { summarise } = require('../engine/analyzer');
 const { classifyStory } = require('../engine/classifier');
 const { pickObject, buildAdHocTest } = require('../engine/adhoc');
 const { prioritise } = require('../engine/priority');
+const { analyzeRunWithCli } = require('../engine/cli-generator');
 const { projectFrom, getProject } = require('./util');
 const { selectTests, withDependencies } = require('./runs');
 const { checkOperation, isProduction } = require('../engine/safety');
@@ -90,6 +92,7 @@ route('GET', '/api/dashboard', (ctx) => {
     kpis: {
       totalProjects: projects.length, activeProjects: projects.filter((p) => p.status === 'active').length,
       apiTests, testRuns: totals.runs || 0, results: totals.results || 0,
+      failed: totals.failed || 0,
       passRate: executed ? Math.round(((totals.passed || 0) / executed) * 1000) / 10 : null,
       failureRate: executed ? Math.round(((totals.failed || 0) / executed) * 1000) / 10 : null,
       blocked: totals.blocked || 0, openDefects, criticalDefects,
@@ -181,14 +184,15 @@ route('POST', '/api/postman/newman', async (ctx) => {
 // ── Agent command console ──
 const MODE_HELP = {
   Discover: 'Discover Salesforce objects, fields, relationships, APIs and Jira requirements.',
-  Generate: 'Generate API test scenarios, test cases and automation.',
-  Execute: 'Execute selected API tests.',
-  Validate: 'Validate Salesforce data against API responses.',
-  Analyze: 'Analyze failures and identify root causes.',
+  Generate: 'Generate API test scenarios from a Jira story (rule engine + optional Cursor/Gemini CLI). Review and approve before they become executable.',
+  Execute: 'Execute approved Salesforce, Experience/B2B, SFCC, or frontend HTTP tests against the live connector.',
+  Validate: 'Re-query Salesforce records after writes and compare persisted fields.',
+  Analyze: 'Rule-based failure categories (ASSUMED until you confirm). Uses Cursor/Gemini CLI for extra notes if logged in.',
   Defect: 'Draft Jira defects for review (never auto-created).',
   Regression: 'Identify and execute impacted regression tests.',
   Report: 'Generate QA reports.',
 };
+const AGENT_NOT = 'This assistant is a command bar, not an LLM that freely designs tests. It matches phrases (analyze STORY-1, run P0, test creating a Contact, GET https://…). Generation is a Jira + describe rule engine; Cursor/Gemini only add proposals if you are logged in. Pass/fail comes from the HTTP runner after you approve tests.';
 
 route('POST', '/api/agent/command', async (ctx) => {
   const text = String(ctx.body.text || '').trim();
@@ -206,8 +210,8 @@ route('POST', '/api/agent/command', async (ctx) => {
   const lastRun = get("SELECT * FROM runs WHERE projectId = $p AND status IN ('completed','stopped') ORDER BY startedAt DESC LIMIT 1", { p: p.id });
   const reply = (mode, message, extra = {}) => { audit('agent', `command.${mode.toLowerCase()}`, { user: ctx.user, projectId: p.id, detail: { text: text.slice(0, 200) } }); return { mode, modeDescription: MODE_HELP[mode], projectId: p.id, message, ...extra }; };
 
-  if (/\b(help|what can you do|commands)\b/.test(lower)) {
-    return reply('Discover', 'Here are the agent modes and example commands.', { modes: MODE_HELP, examples: ['Analyze Jira story DEMO-101 and generate Salesforce API test cases.', 'Discover all APIs related to Contact.', 'Generate negative tests for the Account API.', 'Run the Account API regression suite in QA.', 'Validate the API response against Salesforce.', 'Analyze failed tests from the latest execution.', 'Create Jira defects for confirmed failures.', 'Show me APIs with failure rate above 10%.', 'Generate a Postman collection for this API.', 'Generate Newman automation.', 'Run only P0 and P1 tests.', 'Generate the QA execution report.'] });
+  if (/\b(help|what can you do|commands|what are you)\b/.test(lower)) {
+    return reply('Discover', AGENT_NOT, { modes: MODE_HELP, examples: ['Analyze Jira story DEMO-101 and generate Salesforce API test cases.', 'GET https://httpbin.org/status/200', 'Run frontend HTTP tests.', 'Discover all APIs related to Contact.', 'Generate negative tests for the Account API.', 'Run the Account API regression suite in QA.', 'Validate the API response against Salesforce.', 'Analyze failed tests from the latest execution.', 'Create Jira defects for confirmed failures.', 'Show me APIs with failure rate above 10%.', 'Generate a Postman collection for this API.', 'Generate Newman automation.', 'Run only P0 and P1 tests.', 'Generate the QA execution report.'] });
   }
   if (storyKey && /(analy[sz]e|generate)/.test(lower)) {
     const story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: storyKey });
@@ -216,16 +220,17 @@ route('POST', '/api/agent/command', async (ctx) => {
     if (!cls.needsApiTesting && cls.confidence === 'high' && !/\b(anyway|force|still)\b/.test(lower)) {
       return reply('Discover', `${storyKey} does not look like it needs API testing: ${cls.reasons.join(' ')} Say "Analyze ${storyKey} anyway" if you want scenarios proposed regardless.`, { data: { classification: cls }, examples: [`Analyze ${storyKey} anyway`] });
     }
-    const { analysis, scenarios } = await generateSuite({ project: p, story, sf: salesforceFor(p) });
+    const proposal = await proposeSuite(p, story, ctx.user);
+    const analysis = proposal.analysis || {};
+    const scenarios = proposal.scenarios || [];
     const n = scenarios.reduce((s, x) => s + x.testCases.length, 0);
     if (n === 0) {
-      const why = analysis.objects.length ? `Objects found (${analysis.objects.join(', ')}) but no testable operations or API types were detected.` : 'No Salesforce object or API type could be identified in the story.';
-      return reply('Generate', `Analysed ${storyKey} but could not propose any test cases. ${why} ${analysis.notes.map((x) => x.text).join(' ')} Name the object and the operation (for example "create a Contact via REST") in the story or ask: "Generate negative tests for the Account API".`.replace(/\s+/g, ' ').trim(), { data: { classification: cls, gaps: analysis.gaps } });
+      const why = (analysis.objects || []).length ? `Objects found (${analysis.objects.join(', ')}) but no testable operations or API types were detected.` : 'No Salesforce object or API type could be identified in the story.';
+      return reply('Generate', `Analysed ${storyKey} but could not propose any test cases. ${why} ${(analysis.notes || []).map((x) => x.text).join(' ')} Name the object and the operation (for example "create a Contact via REST") in the story or ask: "Generate negative tests for the Account API".`.replace(/\s+/g, ' ').trim(), { data: { classification: cls, gaps: analysis.gaps } });
     }
-    const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey, status: 'proposed', analysis: { ...analysis, classification: cls }, scenarios, createdBy: ctx.user, createdAt: now() };
-    repo.insert('proposals', proposal);
     const clsNote = cls.needsApiTesting ? '' : ' Note: this ticket may not need API testing — review carefully before approving.';
-    return reply('Generate', `Analysed ${storyKey}: ${analysis.objects.join(', ') || 'no objects'} · operations ${analysis.operations.join(', ') || 'none detected'}. Proposed ${scenarios.length} scenarios / ${n} test cases (metadata ${analysis.metadataLabel}).${clsNote} Review and approve before anything is saved or sent to Jira.`, { navigate: `/stories/${storyKey}?proposal=${proposal.id}`, proposalId: proposal.id, data: { classification: cls } });
+    const via = analysis.generator && analysis.generator !== 'engine' ? ` via ${analysis.generator}` : '';
+    return reply('Generate', `Analysed ${storyKey}: ${(analysis.objects || []).join(', ') || 'no objects'} · operations ${(analysis.operations || []).join(', ') || 'none detected'}. Proposed ${scenarios.length} scenarios / ${n} test cases (metadata ${analysis.metadataLabel}${via}).${clsNote} Uses Cursor CLI / Gemini CLI if connected, with this Jira ticket (and project integration docs) as context. Review and approve before anything is saved or sent to Jira.`, { navigate: `/stories/${storyKey}?proposal=${proposal.id}`, proposalId: proposal.id, data: { classification: cls } });
   }
   if (/\bdiscover\b/.test(lower)) {
     const sf = salesforceFor(p);
@@ -257,6 +262,37 @@ route('POST', '/api/agent/command', async (ctx) => {
     const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: 'AD-HOC', status: 'proposed', analysis: { ...analysis, storyKey: 'AD-HOC', summary: story.summary }, scenarios: filtered, createdBy: ctx.user, createdAt: now() };
     repo.insert('proposals', proposal);
     return reply('Generate', `Proposed ${filtered.reduce((n, s) => n + s.testCases.length, 0)} ${type} tests for ${objMatch} (metadata ${analysis.metadataLabel}). Review and approve to add them.`, { navigate: `/generate/${proposal.id}`, proposalId: proposal.id });
+  }
+  const httpUrl = text.match(/\bhttps?:\/\/[^\s]+/i);
+  if (httpUrl && !/salesforce\.com|force\.com/i.test(httpUrl[0])) {
+    const method = ((text.match(/\b(GET|POST|PUT|PATCH|DELETE|HEAD)\b/i) || [])[1] || 'GET').toUpperCase();
+    const pathUrl = httpUrl[0].replace(/[.,;)]+$/, '');
+    const draft = {
+      title: `${method} ${pathUrl}`, method, endpoint: pathUrl, apiType: 'HTTP', auth: 'default',
+      headers: {}, query: {}, body: null, assertions: [{ type: 'status', op: 'lt', expected: 500 }],
+      extract: [], tags: ['frontend', 'chat-generated'], testType: 'Functional',
+    };
+    const safety = checkOperation(p, { method: draft.method, path: draft.endpoint, body: draft.body }, { confirmProductionWrites: ctx.body.confirmProductionWrites, confirmDelete: ctx.body.confirmDelete });
+    if (safety) throw new HttpError(409, safety.title, safety);
+    const conn = connectorFor(p, draft);
+    if (!conn.available && !/^https?:\/\//i.test(draft.endpoint)) throw new HttpError(503, conn.unavailableExplanation().title, conn.unavailableExplanation());
+    const pr = prioritise({ ...draft }, { project: p });
+    const tcId = nextId('TC', 5);
+    const seq = (get('SELECT MAX(seq) AS m FROM test_cases WHERE projectId = $p', { p: p.id }).m || 0) + 10;
+    repo.insert('test_cases', {
+      id: tcId, projectId: p.id, scenarioId: null, storyKey: null, seq,
+      title: draft.title, description: 'Generated from an agent chat HTTP URL — executed against the live origin.',
+      apiType: 'HTTP', method: draft.method, endpoint: draft.endpoint, auth: draft.auth,
+      headers: {}, query: {}, body: null, bodyRaw: null, assertions: draft.assertions, extract: [],
+      sfValidation: null, cleanup: null, timeoutMs: null, object: null, testType: 'Functional',
+      priority: pr.priority, priorityReason: pr, status: 'ready', label: 'ASSUMED', tags: draft.tags, automated: 1, createdAt: now(), updatedAt: now(),
+    });
+    const run = runner.startRun({ project: p, testCases: [repo.get('test_cases', tcId)], user: ctx.user, options: { label: `Chat HTTP: ${pathUrl.slice(0, 60)}`, trigger: 'agent-chat' } });
+    await runner.waitForRun(run.id);
+    const resultRow = repo.find('run_results', 'runId = $r', { r: run.id })[0];
+    return reply('Execute', `Ran ${method} ${pathUrl} in ${p.environment}: ${resultRow.status}${resultRow.statusCode ? ` (HTTP ${resultRow.statusCode})` : ''}. Saved as ${tcId}. This is a real HTTP call, not a Salesforce simulator.`, {
+      navigate: `/testcases?id=${tcId}`, exchange: { ...resultRow, testCase: { id: tcId, title: draft.title, label: 'ASSUMED' } },
+    });
   }
   if (/\b(test|try|check|verify|simulate)\b/i.test(lower) && !/\bgenerate\b/.test(lower)) {
     const sf = salesforceFor(p);
@@ -304,6 +340,7 @@ route('POST', '/api/agent/command', async (ctx) => {
     if (prios.length) body.filter.priority = [...new Set(prios)];
     if (/regression/.test(lower)) body.filter.tag = 'regression';
     if (/failed/.test(lower)) { body.filter.lastResult = ['failed', 'blocked']; }
+    if (/\bfrontend\b|\bhttp\b|\bpostman\b/.test(lower) && !/\bhelp\b/.test(lower)) body.filter.apiType = ['HTTP', 'OCAPI', 'SCAPI'];
     let tests = selectTests(p, body);
     if (objMatch) tests = tests.filter((t) => t.object === objMatch || t.endpoint.includes(objMatch));
     if (!tests.length) return reply('Execute', 'No executable tests match that request.', {});
@@ -330,7 +367,9 @@ route('POST', '/api/agent/command', async (ctx) => {
     if (!lastRun) return reply('Analyze', 'No completed execution yet.');
     const rows = repo.find('run_results', 'runId = $r', { r: lastRun.id });
     const s = summarise(rows);
-    return reply('Analyze', `${lastRun.id}: ${lastRun.failed} failed, ${lastRun.blocked} blocked. ${s.categories.map((c) => `${c.category}: ${c.count}`).join(' · ') || 'No failures.'} Root causes are ASSUMED until confirmed.`, { navigate: `/execution/${lastRun.id}?tab=analysis`, data: s });
+    const cli = await analyzeRunWithCli(p, lastRun, rows.filter((r) => r.status === 'failed')).catch(() => null);
+    const extra = cli && cli.notes && cli.notes.length ? ` ${cli.source} notes: ${cli.notes.join(' ')}` : '';
+    return reply('Analyze', `${lastRun.id}: ${lastRun.failed} failed, ${lastRun.blocked} blocked. ${s.categories.map((c) => `${c.category}: ${c.count}`).join(' · ') || 'No failures.'} Root causes are ASSUMED until confirmed.${extra} ${AGENT_NOT}`, { navigate: `/execution/${lastRun.id}?tab=analysis`, data: { ...s, cli } });
   }
   if (/failure rate|failing apis|apis with/.test(lower)) {
     const thr = Number((lower.match(/(\d+)\s*%/) || [])[1] || 10);
@@ -347,5 +386,5 @@ route('POST', '/api/agent/command', async (ctx) => {
   if (/regression|impact/.test(lower)) {
     return reply('Regression', 'Open Regression to pick the changed objects or story; impacted tests are ranked by priority.', { navigate: '/regression' });
   }
-  return reply('Discover', 'I did not recognise that command. Type "help" to see examples.', {});
+  return reply('Discover', `${AGENT_NOT} Type "help" for commands, paste an https URL to run it, or "Analyze PROJ-123" after syncing Jira.`, { examples: ['help', 'GET https://httpbin.org/get', 'Run only P0 and P1 tests', 'Run frontend HTTP tests'] });
 });

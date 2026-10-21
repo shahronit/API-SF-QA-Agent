@@ -3,8 +3,8 @@
 const crypto = require('node:crypto');
 const { route, HttpError, required } = require('../http');
 const { repo, all, get, now, audit, nextId, transaction } = require('../db');
-const { salesforceFor, jiraFor } = require('../connectors');
-const { generateSuite } = require('../engine/generator');
+const { salesforceFor, jiraFor, postmanFor } = require('../connectors');
+const { generateProposedSuite } = require('../engine/cli-generator');
 const { classifyStory } = require('../engine/classifier');
 const { projectFrom, getProject, paginate, likeFilter, inFilter } = require('./util');
 
@@ -50,6 +50,7 @@ route('POST', '/api/stories/sync', async (ctx) => {
     const issues = await jira.searchStories({ jql: ctx.body.jql });
     const saved = transaction(() => issues.map((i) => upsertStory(p.id, i, p.mode === 'demo' ? 'demo-jira' : 'jira')));
     audit('jira', 'stories.synced', { user: ctx.user, projectId: p.id, detail: { count: saved.length, jql: ctx.body.jql || null } });
+    require('../engine/workflow').touch(p.id, 'jira', saved.length ? 'completed' : 'in_progress', { stories: saved.length });
     return { synced: saved.length };
   } catch (e) { throw new HttpError(502, e.explanation ? e.explanation.title : e.message, e.explanation || {}); }
 });
@@ -83,6 +84,21 @@ route('GET', '/api/stories/:key', async (ctx) => {
 });
 
 // ── Generation ──
+async function proposeSuite(p, story, user) {
+  const sf = salesforceFor(p);
+  const t0 = Date.now();
+  const docs = repo.find('context_docs', 'projectId = $p', { p: p.id }, 'ORDER BY updatedAt DESC');
+  const { analysis, scenarios, source } = await generateProposedSuite({ project: p, story, sf, docs });
+  const classification = classifyStory(story);
+  const createdBy = `${user} · ${source || 'engine'}`;
+  const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: story.key, status: 'proposed', analysis: { ...analysis, classification, generationMs: Date.now() - t0, generator: source || 'engine' }, scenarios, createdBy, createdAt: now() };
+  repo.insert('proposals', proposal);
+  audit('generation', 'suite.proposed', { user, projectId: p.id, detail: { proposalId: proposal.id, storyKey: story.key, source: source || 'engine', scenarios: scenarios.length, tests: scenarios.reduce((n, s) => n + s.testCases.length, 0) } });
+  require('../engine/workflow').touch(p.id, 'generate', 'completed', { proposalId: proposal.id, storyKey: story.key });
+  require('../engine/workflow').touch(p.id, 'review', 'requires_approval', { proposalId: proposal.id });
+  return proposal;
+}
+
 route('POST', '/api/generate', async (ctx) => {
   const p = projectFrom(ctx);
   required(ctx.body, ['storyKey']);
@@ -92,14 +108,42 @@ route('POST', '/api/generate', async (ctx) => {
     if (!jira.available) throw new HttpError(404, `Story ${ctx.body.storyKey} not found locally and Jira is unavailable.`, jira.unavailableExplanation());
     story = upsertStory(p.id, await jira.getIssue(ctx.body.storyKey), 'jira');
   }
-  const sf = salesforceFor(p);
-  const t0 = Date.now();
-  const { analysis, scenarios } = await generateSuite({ project: p, story, sf });
-  const classification = classifyStory(story);
-  const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: story.key, status: 'proposed', analysis: { ...analysis, classification, generationMs: Date.now() - t0 }, scenarios, createdBy: ctx.user, createdAt: now() };
-  repo.insert('proposals', proposal);
-  audit('generation', 'suite.proposed', { user: ctx.user, projectId: p.id, detail: { proposalId: proposal.id, storyKey: story.key, scenarios: scenarios.length, tests: scenarios.reduce((n, s) => n + s.testCases.length, 0) } });
-  return proposal;
+  return proposeSuite(p, story, ctx.user);
+});
+
+route('POST', '/api/stories/sync-and-generate', async (ctx) => {
+  const p = projectFrom(ctx);
+  const jira = jiraFor(p);
+  if (!jira.available) throw new HttpError(503, jira.unavailableExplanation().title, jira.unavailableExplanation());
+  const onlyNeedingApi = ctx.body.onlyNeedingApi !== false;
+  let issues;
+  try { issues = await jira.searchStories({ jql: ctx.body.jql }); } catch (e) {
+    throw new HttpError(502, e.explanation ? e.explanation.title : e.message, e.explanation || {});
+  }
+  const saved = transaction(() => issues.map((i) => upsertStory(p.id, i, p.mode === 'demo' ? 'demo-jira' : 'jira')));
+  audit('jira', 'stories.synced', { user: ctx.user, projectId: p.id, detail: { count: saved.length, jql: ctx.body.jql || null, generate: true } });
+  const selected = saved.filter((s) => {
+    const cls = classifyStory(s);
+    return onlyNeedingApi ? cls.needsApiTesting : true;
+  });
+  const skipped = saved.length - selected.length;
+  const proposals = [];
+  const errors = [];
+  for (const story of selected) {
+    try {
+      const pr = await proposeSuite(p, story, ctx.user);
+      const tests = pr.scenarios.reduce((n, s) => n + s.testCases.length, 0);
+      let approved = null;
+      if (ctx.body.approve) {
+        // Reuse the approve route logic by calling it internally would recurse HTTP; keep proposals for review by default.
+        approved = false;
+      }
+      proposals.push({ id: pr.id, storyKey: story.key, summary: story.summary, scenarios: pr.scenarios.length, tests, classification: pr.analysis.classification, approved });
+    } catch (e) {
+      errors.push({ storyKey: story.key, title: e.explanation ? e.explanation.title : e.message });
+    }
+  }
+  return { synced: saved.length, selected: selected.length, skipped, proposals, errors };
 });
 
 route('GET', '/api/proposals/:id', (ctx) => {
@@ -151,6 +195,16 @@ route('POST', '/api/proposals/:id/approve', async (ctx) => {
     repo.update('proposals', pr.id, { status: 'approved', decidedAt: now(), decision: { by: ctx.user, selected: selected || 'all', postToJira: Boolean(ctx.body.postToJira) } });
   });
   audit('generation', 'suite.approved', { user: ctx.user, projectId: p.id, detail: { proposalId: pr.id, storyKey: pr.storyKey, ...created, ids: undefined } });
+  require('../engine/workflow').touch(p.id, 'approve', 'completed', { proposalId: pr.id, tests: created.tests });
+  require('../engine/workflow').touch(p.id, 'review', 'completed', { proposalId: pr.id });
+  let postman = null;
+  try {
+    const tests = repo.find('test_cases', 'projectId = $p', { p: p.id }, 'ORDER BY seq');
+    postman = await postmanFor(p).syncApproved(tests);
+    require('../engine/workflow').touch(p.id, 'postman', postman.mcp ? 'completed' : 'in_progress', { collectionId: postman.collectionId, mcp: postman.mcp, tests: tests.length });
+  } catch (e) {
+    postman = { ok: false, mcp: false, title: (e.explanation && e.explanation.title) || e.message, notice: 'Tests were approved. Postman sync did not complete.' };
+  }
   let jira = null;
   if (ctx.body.postToJira) {
     const conn = jiraFor(p);
@@ -166,7 +220,7 @@ route('POST', '/api/proposals/:id/approve', async (ctx) => {
       } catch (e) { jira = { ok: false, ...(e.explanation || { title: e.message }) }; }
     }
   }
-  return { ...created, jira };
+  return { ...created, jira, postman };
 });
 
 route('POST', '/api/proposals/:id/reject', (ctx) => {

@@ -117,6 +117,31 @@ CREATE TABLE IF NOT EXISTS audit_log (
   category TEXT NOT NULL, action TEXT NOT NULL, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_audit ON audit_log(projectId, ts);
+
+CREATE TABLE IF NOT EXISTS workflow_state (
+  projectId TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  currentStep TEXT NOT NULL, steps TEXT NOT NULL, updatedAt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collections (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  uid TEXT NOT NULL, name TEXT NOT NULL, workspace TEXT, environment TEXT,
+  source TEXT NOT NULL, fingerprint TEXT, content TEXT, lastSyncedAt TEXT,
+  createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
+  UNIQUE(projectId, uid)
+);
+
+CREATE TABLE IF NOT EXISTS collection_proposals (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  collectionId TEXT, uid TEXT, status TEXT NOT NULL, diff TEXT, collection TEXT,
+  createdBy TEXT, createdAt TEXT NOT NULL, decidedAt TEXT, decision TEXT
+);
+
+CREATE TABLE IF NOT EXISTS context_docs (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, body TEXT, filePath TEXT,
+  createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+);
 `;
 db.exec(SCHEMA);
 
@@ -134,6 +159,9 @@ const JSON_FIELDS = {
   contracts: ['spec'],
   demo_jira: ['labels', 'components', 'comments', 'links'],
   audit_log: ['detail'],
+  workflow_state: ['steps'],
+  collections: ['content'],
+  collection_proposals: ['diff', 'collection', 'decision'],
 };
 
 function decode(table, row) {

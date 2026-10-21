@@ -12,6 +12,12 @@ const { prioritise } = require('./priority');
 const { metadataLabel } = require('../connectors');
 const ai = require('./ai');
 const { apiTypeScenarios } = require('./apitypes');
+const { commerceScenarios, enabled: commerceEnabled } = require('./commerce');
+const { experienceScenarios, experienceEnabled } = require('./experience');
+const { parseAcceptance, applyAcceptance } = require('./acceptance');
+const { loadFixtures, fixtureTests } = require('./org-fixtures');
+const { httpScenarios } = require('./http-scenarios');
+const contracts = require('./contracts');
 
 const OPS = {
   create: /\b(create|creat(es|ing)|add|insert|new|register|submit|onboard)\b/i,
@@ -34,16 +40,30 @@ const API_HINTS = [
   ['OAuth 2.0', /\b(oauth|connected app|jwt bearer|client credentials|refresh token|token endpoint)\b/i],
   ['Pagination', /\b(paginat\w*|nextRecordsUrl|query ?more|batch ?size)\b/i],
   ['Change Data Capture', /\b(change data capture|cdc|\w+ChangeEvent)\b/i],
+  ['Commerce Cloud OCAPI', /\b(ocapi|open commerce api|demandware shop api)\b/i],
+  ['Commerce Cloud SCAPI', /\b(scapi|shopper api|shopper-products|shopper-baskets|shopper-search|\bslas\b)\b/i],
+  ['Commerce Cloud', /\b(commerce cloud|sfcc|b2c commerce|b2c storefront|storefront api|shopper basket|product search)\b/i],
+  ['Experience Cloud', /\b(experience cloud|digital experience|community cloud|lwr site)\b/i],
+  ['B2B Commerce', /\b(b2b commerce|b2b lightning|cloudcraze|webstore)\b/i],
 ];
 
 const SF_ID_RX = '^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$';
+const RESERVED_VARS = new Set(['siteId', 'orgId', 'shortCode', 'apiVersion', 'runId', 'instanceUrl', 'environment', 'httpBaseUrl', 'accessToken', 'sessionId', 'ccSiteId', 'ccOrgId', 'ccShortCode']);
+/** Common English words that are also Salesforce API names — do not match lowercase “site”/“image” in storefront stories. */
+const AMBIGUOUS_OBJECTS = new Set(['Site', 'Image', 'Document', 'Folder', 'Attachment', 'Note', 'Dashboard', 'Report', 'ListView', 'Topic', 'FeedItem', 'Photo', 'ContentDocument', 'ContentVersion', 'ContentBody']);
 
 function words(text) { return String(text || '').toLowerCase(); }
 
 function detectObjects(text, catalog) {
+  const raw = String(text || '');
   const t = ' ' + words(text).replace(/[^a-z0-9_ ]/g, ' ') + ' ';
   const hits = [];
   for (const o of catalog) {
+    if (AMBIGUOUS_OBJECTS.has(o.name)) {
+      const api = o.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (!new RegExp(`(?:FROM|sobjects[/ ]|object(?:\\s+API)?(?:\\s+name)?)\\s+${api}\\b|\\b${api}__c\\b|\\b${api}\\b`).test(raw)) continue;
+      if (!new RegExp(`\\b${api}\\b`).test(raw)) continue; // case-sensitive: “site” ≠ Site
+    }
     const names = [o.name.toLowerCase(), (o.label || '').toLowerCase()].filter(Boolean);
     const forms = names.flatMap((n) => [n, n + 's', n.replace(/y$/, 'ies')]);
     if (forms.some((n) => n.length > 2 && t.includes(' ' + n + ' '))) hits.push(o.name);
@@ -69,6 +89,10 @@ function acceptanceList(story) {
 
 const iso = (d) => d.toISOString().slice(0, 10);
 
+function pickValues(f) {
+  return (f.picklistValues || []).map((p) => (typeof p === 'string' ? p : p && (p.value || p.label))).filter((v) => typeof v === 'string' && v);
+}
+
 /** Generate a realistic value for a field. */
 function sampleValue(f, { variant = 'valid', obj } = {}) {
   const max = f.length || 80;
@@ -76,8 +100,8 @@ function sampleValue(f, { variant = 'valid', obj } = {}) {
     case 'email': return '{{$randomEmail}}';
     case 'phone': return '+1 415 555 0142';
     case 'url': return 'https://qa.example.com';
-    case 'picklist': return f.picklistValues && f.picklistValues.length ? f.picklistValues[0] : 'Other';
-    case 'multipicklist': return f.picklistValues && f.picklistValues.length ? f.picklistValues[0] : '';
+    case 'picklist': return pickValues(f)[0] || 'Other';
+    case 'multipicklist': return pickValues(f)[0] || '';
     case 'date': return iso(new Date(Date.now() + 30 * 864e5));
     case 'datetime': return new Date(Date.now() + 864e5).toISOString();
     case 'boolean': return true;
@@ -113,6 +137,11 @@ function requiredParents(describe) {
 
 function camel(s) { return s.replace(/__c$/, '').replace(/_/g, '').replace(/^./, (c) => c.toLowerCase()); }
 
+function recordIdVar(obj) {
+  const v = `${camel(obj)}Id`;
+  return RESERVED_VARS.has(v) ? `${camel(obj)}RecordId` : v;
+}
+
 class SuiteBuilder {
   constructor({ project, story, label }) {
     this.project = project;
@@ -131,7 +160,7 @@ class SuiteBuilder {
 
   add(s, tc) {
     const full = {
-      apiType: s.apiType === 'Apex REST' ? 'Apex REST' : tc.apiType || 'REST', auth: 'default', headers: {}, query: {}, extract: [], tags: [], label: s.label,
+      apiType: tc.apiType || (s.apiType === 'Apex REST' || /^(OCAPI|SCAPI|Bulk API|Composite|GraphQL|SOAP|Tooling)/.test(s.apiType || '') ? s.apiType : 'REST'), auth: 'default', headers: {}, query: {}, extract: [], tags: [], label: s.label,
       testType: s.type, object: s.object, status: 'ready', ...tc,
     };
     if (!full.assertions.some((a) => a.type === 'responseTime') && full.auth === 'default') {
@@ -159,10 +188,13 @@ class SuiteBuilder {
 function crudScenarios(b, d, analysis, objectFields) {
   const obj = d.name;
   const v = b.v;
-  const varId = `${camel(obj)}Id`;
+  const varId = recordIdVar(obj);
   const ops = analysis.operations;
   const mentioned = objectFields[obj] || [];
-  if (String(b.project.environment).toLowerCase() === 'production') {
+  if (!d.createable && String(b.project.environment).toLowerCase() !== 'production') {
+    analysis.gaps.push({ label: 'ASSUMED', text: `${obj} is not createable via the REST API in this org. Generated read/describe coverage only — storefront/Experience flows use Connect REST, not POST /sobjects/${obj}.` });
+  }
+  if (String(b.project.environment).toLowerCase() === 'production' || d.createable === false) {
     // Production is READ ONLY: generate non-mutating smoke coverage only.
     const ro = b.scenario(`${d.label} — read-only production smoke`, 'Functional', 'REST API', obj, 'Non-mutating checks safe for Production.');
     const qf = ['Id', ...d.fields.filter((f) => ['string', 'picklist'].includes(f.type) && !f.pii).slice(0, 3).map((f) => f.name)].join(', ');
@@ -173,9 +205,11 @@ function crudScenarios(b, d, analysis, objectFields) {
     const rn = b.scenario(`${d.label} — read-only negative checks`, 'Negative', 'REST API', obj, 'Invalid ids are rejected without side effects.');
     b.add(rn, { title: `Retrieve ${obj} with a non-existent Id`, method: 'GET', endpoint: `${v}/sobjects/${obj}/${d.keyPrefix || '001'}000000000000AAA`, assertions: [{ type: 'status', op: 'eq', expected: 404 }] });
     const rs = b.scenario(`${d.label} — authentication (read-only)`, 'Security', 'REST API', obj, 'Token handling on read endpoints.');
-    b.add(rs, { title: `Query ${obj} without an access token`, method: 'GET', endpoint: `${v}/query`, query: { q: `SELECT Id FROM ${obj} LIMIT 1` }, auth: 'none', assertions: [{ type: 'status', op: 'eq', expected: 401 }], tags: ['authentication'] });
-    b.add(rs, { title: `Query ${obj} with an invalid access token`, method: 'GET', endpoint: `${v}/query`, query: { q: `SELECT Id FROM ${obj} LIMIT 1` }, auth: 'invalid', assertions: [{ type: 'status', op: 'eq', expected: 401 }], tags: ['authentication'] });
-    analysis.gaps.push({ label: 'RECOMMENDED', text: `Production project: create/update/delete tests for ${obj} were not generated (read-only by default). Cover writes in a sandbox.` });
+    b.add(rs, { title: `Query ${obj} without an access token`, method: 'GET', endpoint: `${v}/query`, query: { q: `SELECT Id FROM ${obj} LIMIT 1` }, auth: 'none', assertions: [{ type: 'status', op: 'in', expected: [401, 403] }], tags: ['authentication'] });
+    b.add(rs, { title: `Query ${obj} with an invalid access token`, method: 'GET', endpoint: `${v}/query`, query: { q: `SELECT Id FROM ${obj} LIMIT 1` }, auth: 'invalid', assertions: [{ type: 'status', op: 'in', expected: [401, 403] }], tags: ['authentication'] });
+    if (String(b.project.environment).toLowerCase() === 'production') {
+      analysis.gaps.push({ label: 'RECOMMENDED', text: `Production project: create/update/delete tests for ${obj} were not generated (read-only by default). Cover writes in a sandbox.` });
+    }
     return;
   }
   const parents = requiredParents(d);
@@ -242,8 +276,9 @@ function crudScenarios(b, d, analysis, objectFields) {
       .sort((x, y) => (Number(summaryFields.includes(y.name)) * 2 + Number(mentioned.includes(y.name))) - (Number(summaryFields.includes(x.name)) * 2 + Number(mentioned.includes(x.name))));
     for (const f of candidates.slice(0, 2)) {
       const story = words(b.story.summary + ' ' + b.story.description + ' ' + b.story.acceptanceCriteria);
-      const pickFromStory = f.picklistValues && f.picklistValues.find((pv) => story.includes(pv.toLowerCase()));
-      upd[f.name] = f.type === 'picklist' && f.picklistValues.length ? (pickFromStory || f.picklistValues[Math.min(1, f.picklistValues.length - 1)]) : sampleValue(f, { obj });
+      const picks = pickValues(f);
+      const pickFromStory = picks.find((pv) => story.includes(String(pv).toLowerCase()));
+      upd[f.name] = f.type === 'picklist' && picks.length ? (pickFromStory || picks[Math.min(1, picks.length - 1)]) : sampleValue(f, { obj });
     }
     if (Object.keys(upd).length) {
       b.add(fn, {
@@ -412,11 +447,11 @@ function crudScenarios(b, d, analysis, objectFields) {
   const sec = b.scenario(`${d.label} — authentication and authorization`, 'Security', 'REST API', obj, 'Token handling, object/field/record access for restricted users.');
   b.add(sec, {
     title: `Create ${obj} without an access token`, method: 'POST', endpoint: `${v}/sobjects/${obj}`, body: payload, auth: 'none',
-    assertions: [{ type: 'status', op: 'eq', expected: 401 }, { type: 'sfError', op: 'eq', expected: 'INVALID_SESSION_ID' }], tags: ['authentication'],
+    assertions: [{ type: 'status', op: 'in', expected: [401, 403] }], tags: ['authentication'],
   });
   b.add(sec, {
     title: `Query ${obj} with an invalid / expired access token`, method: 'GET', endpoint: `${v}/query`, query: { q: `SELECT Id FROM ${obj} LIMIT 1` }, auth: 'invalid',
-    assertions: [{ type: 'status', op: 'eq', expected: 401 }, { type: 'sfError', op: 'eq', expected: 'INVALID_SESSION_ID' }], tags: ['authentication'],
+    assertions: [{ type: 'status', op: 'in', expected: [401, 403] }], tags: ['authentication'],
   });
   const lp = (b.project.businessConfig && b.project.businessConfig.lowPrivilegeExpectations) || null;
   if (lp) {
@@ -510,7 +545,7 @@ function integrationScenarios(b, analysis) {
     }
     b.add(s, {
       title: `${e.name}: unauthenticated call is rejected`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path, body: sample, auth: 'none',
-      assertions: [{ type: 'status', op: 'eq', expected: 401 }], tags: ['authentication'],
+      assertions: [{ type: 'status', op: 'in', expected: [401, 403] }], tags: ['authentication'],
     });
     if (e.healthPath) {
       b.add(s, {
@@ -599,6 +634,12 @@ async function generateSuite({ project, story, sf }) {
   const operations = Object.entries(OPS).filter(([, rx]) => rx.test(text)).map(([k]) => k);
   const integration = INTEGRATION.test(text);
   const apiTypes = ['REST API', ...API_HINTS.filter(([, rx]) => rx.test(text)).map(([n]) => n)];
+  const detectedTypes = ((project.integrationConfig && project.integrationConfig.salesforceDetection) || {}).types || [];
+  if (detectedTypes.some((t) => /B2C|SFCC|Commerce Cloud/i.test(t)) && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) apiTypes.push('Commerce Cloud');
+  if (detectedTypes.some((t) => /Experience/i.test(t)) && !apiTypes.includes('Experience Cloud')) apiTypes.push('Experience Cloud');
+  if (detectedTypes.some((t) => /B2B/i.test(t)) && !apiTypes.includes('B2B Commerce')) apiTypes.push('B2B Commerce');
+  if (commerceEnabled(project) && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) apiTypes.push('Commerce Cloud');
+  if (experienceEnabled(project) && !apiTypes.some((t) => /Experience|B2B Commerce/i.test(t))) apiTypes.push('Experience Cloud');
   if (endpoints.some((e) => (e.keywords || []).some((k) => lower.includes(k.toLowerCase())))) apiTypes.push('Apex REST');
   const queryFilters = {};
   for (const o of objects) {
@@ -606,28 +647,47 @@ async function generateSuite({ project, story, sf }) {
     if (qf && operations.includes('query')) queryFilters[o] = qf;
   }
   const ac = acceptanceList(story);
+  const acceptance = parseAcceptance(story);
   const gaps = [];
   if (!ac.length) gaps.push({ label: 'RECOMMENDED', text: 'Story has no acceptance criteria — expected status codes and error behaviour are assumed from Salesforce defaults.' });
   if (!/error|invalid|fail|reject/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'Error handling is not specified. Confirm expected error codes/messages for invalid input.' });
   if (!/permission|profile|access|role|security|authori/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'Authorization requirements are not stated. Confirm which users/profiles may perform this operation.' });
   if (integration && !/retry|idempot|duplicate/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'Integration story does not define retry/idempotency or duplicate handling. Tests assume no duplicates and safe retries.' });
   if (integration && !/timeout|sla|latency|response time/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'No timeout/SLA defined. Using project SLA of ' + ((project.businessConfig && project.businessConfig.slaMs) || 2000) + ' ms.' });
-  if (!objects.length) gaps.push({ label: 'RECOMMENDED', text: 'No Salesforce object could be identified. Name the object (e.g. Contact) in the story or select it manually.' });
+  if (!objects.length && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) gaps.push({ label: 'RECOMMENDED', text: 'No Salesforce object could be identified. Name the object (e.g. Contact) in the story or select it manually.' });
+
+  let fixtures = {};
+  try { fixtures = await loadFixtures(sf, objects, describes); } catch { fixtures = {}; }
+
+  let commerceCatalog = null;
+  if (commerceEnabled(project) || apiTypes.some((t) => /Commerce Cloud/i.test(t))) {
+    try {
+      const commerce = require('../connectors').commerceFor(project);
+      if (commerce && typeof commerce.fetchCatalogSample === 'function') commerceCatalog = await commerce.fetchCatalogSample();
+    } catch { commerceCatalog = null; }
+  }
 
   const analysis = {
     storyKey: story.key, summary: story.summary, objects, operations, integration, apiTypes: [...new Set(apiTypes)],
-    fields: objectFields, acceptanceCriteria: ac, gaps, notes, metadataSource, metadataLabel: effectiveLabel,
+    catalogNames: (catalog || []).map((o) => o.name).filter(Boolean),
+    fields: objectFields, acceptanceCriteria: ac, acceptance, gaps, notes, metadataSource, metadataLabel: effectiveLabel,
     describes: Object.fromEntries(Object.entries(describes).map(([k, d]) => [k, { name: d.name, label: d.label, keyPrefix: d.keyPrefix, fields: d.fields }])),
-    queryFilters,
+    queryFilters, fixtures, commerceCatalog,
   };
 
   const b = new SuiteBuilder({ project, story, label: effectiveLabel });
   for (const o of objects.slice(0, 3)) {
     if (!describes[o] || o.endsWith('__e')) continue;
     crudScenarios(b, describes[o], analysis, objectFields);
+    if (fixtures[o]) fixtureTests(b, o, fixtures[o]);
   }
   integrationScenarios(b, analysis);
   apiTypeScenarios(b, analysis, { buildPayload, SF_ID_RX, camel });
+  experienceScenarios(b, analysis);
+  if (analysis.apiTypes.some((t) => /Commerce Cloud/i.test(t)) || commerceEnabled(project)) commerceScenarios(b, analysis);
+  httpScenarios(b, analysis);
+  analysis.acceptanceMapped = applyAcceptance(b.scenarios, acceptance);
+  try { contracts.attachToScenarios(project, b.scenarios); } catch { /* contracts table may be empty in unit tests */ }
   // Run-scoped unique values ({{runId}}) are only unique *per run*. Two stories on the same object
   // generate identical keys, so they collide when executed together (e.g. a full regression).
   // Add a per-generation suffix, applied consistently across every test of this suite, so each
@@ -645,4 +705,4 @@ async function generateSuite({ project, story, sf }) {
   return { analysis: slim, scenarios };
 }
 
-module.exports = { generateSuite, buildPayload, sampleValue, detectObjects, detectFields, OPS };
+module.exports = { generateSuite, buildPayload, sampleValue, detectObjects, detectFields, OPS, recordIdVar };

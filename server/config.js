@@ -36,7 +36,7 @@ const config = {
   host: env('HOST', '127.0.0.1'),
   dataDir: path.resolve(ROOT, env('DATA_DIR', './data')),
   appUser: env('APP_USER', 'qa.engineer'),
-  seedDemo: env('SEED_DEMO', 'true') !== 'false',
+  seedDemo: env('SEED_DEMO', 'false') === 'true',
   jira: {
     sprintField: env('JIRA_SPRINT_FIELD', 'customfield_10020'),
     linkType: env('JIRA_LINK_TYPE', 'Relates'),
@@ -82,10 +82,46 @@ function jiraCredentials(ref) {
   return { email, token };
 }
 
+function salesforceMcpSettings(ref) {
+  const p = `SF_${normRef(ref)}_`;
+  const url = env(p + 'MCP_URL') || env('SF_MCP_URL');
+  const command = env(p + 'MCP_COMMAND') || env('SF_MCP_COMMAND');
+  if (!url && !command) return null;
+  return { url, command, timeoutMs: Number(env(p + 'MCP_TIMEOUT_MS') || env('SF_MCP_TIMEOUT_MS') || 20000) };
+}
+
+function postmanSettings(ref) {
+  const p = `POSTMAN_${normRef(ref)}_`;
+  const url = env(p + 'MCP_URL') || env('POSTMAN_MCP_URL');
+  const command = env(p + 'MCP_COMMAND') || env('POSTMAN_MCP_COMMAND');
+  const apiKey = env(p + 'API_KEY') || env('POSTMAN_API_KEY');
+  const workspace = env(p + 'WORKSPACE') || env('POSTMAN_WORKSPACE');
+  if (!url && !command && !apiKey && !workspace) return null;
+  return { url, command, apiKey, workspace, timeoutMs: Number(env(p + 'MCP_TIMEOUT_MS') || env('POSTMAN_MCP_TIMEOUT_MS') || 20000) };
+}
+
+function commerceCredentials(ref) {
+  const p = `SFCC_${normRef(ref)}_`;
+  const clientId = env(p + 'CLIENT_ID') || env('SFCC_CLIENT_ID');
+  const clientSecret = env(p + 'CLIENT_SECRET') || env('SFCC_CLIENT_SECRET');
+  if (!ref || !clientId || !clientSecret) return null;
+  return { clientId, clientSecret };
+}
+
+function httpCredentials(ref) {
+  const p = ref ? `HTTP_${normRef(ref)}_` : 'HTTP_';
+  const token = env(p + 'TOKEN') || env('HTTP_BEARER_TOKEN');
+  const baseUrl = env(p + 'BASE_URL') || env('HTTP_BASE_URL');
+  if (!token && !baseUrl) return null;
+  return { token: token || '', baseUrl: baseUrl || '' };
+}
+
 /** Presence-only report — safe to send to the UI. */
-function credentialStatus(sfRef, jiraRef) {
+function credentialStatus(sfRef, jiraRef, commerceRef) {
   const p = `SF_${normRef(sfRef)}_`;
   const has = (k) => Boolean(env(k));
+  const mcp = salesforceMcpSettings(sfRef);
+  const ccPrefix = commerceRef ? `SFCC_${normRef(commerceRef)}_` : (sfRef ? `SFCC_${normRef(sfRef)}_` : 'SFCC_');
   return {
     salesforce: {
       prefix: sfRef ? p : null,
@@ -96,11 +132,33 @@ function credentialStatus(sfRef, jiraRef) {
       privateKey: has(p + 'PRIVATE_KEY_PATH'),
       refreshToken: has(p + 'REFRESH_TOKEN'),
       lowPrivilegeUser: has(p + 'LOWPRIV_CLIENT_ID'),
-      configured: Boolean(salesforceCredentials(sfRef)),
+      mcpUrl: Boolean((mcp && mcp.url) || has(p + 'MCP_URL')),
+      mcpCommand: Boolean((mcp && mcp.command) || has(p + 'MCP_COMMAND')),
+      configured: Boolean(salesforceCredentials(sfRef) || mcp),
     },
     jira: {
       configured: Boolean(jiraCredentials(jiraRef)),
       prefix: jiraRef ? `JIRA_${normRef(jiraRef)}_` : 'JIRA_',
+    },
+    commerce: {
+      prefix: ccPrefix,
+      clientId: has(ccPrefix + 'CLIENT_ID') || has('SFCC_CLIENT_ID'),
+      clientSecret: has(ccPrefix + 'CLIENT_SECRET') || has('SFCC_CLIENT_SECRET'),
+      configured: Boolean(commerceCredentials(commerceRef || sfRef)),
+    },
+    postman: {
+      prefix: sfRef ? `POSTMAN_${normRef(sfRef)}_` : 'POSTMAN_',
+      mcpUrl: Boolean(env(`POSTMAN_${normRef(sfRef)}_MCP_URL`) || env('POSTMAN_MCP_URL')),
+      mcpCommand: Boolean(env(`POSTMAN_${normRef(sfRef)}_MCP_COMMAND`) || env('POSTMAN_MCP_COMMAND')),
+      apiKey: Boolean(env(`POSTMAN_${normRef(sfRef)}_API_KEY`) || env('POSTMAN_API_KEY')),
+      workspace: env(`POSTMAN_${normRef(sfRef)}_WORKSPACE`) || env('POSTMAN_WORKSPACE') || null,
+      configured: Boolean(postmanSettings(sfRef)),
+    },
+    http: {
+      prefix: sfRef ? `HTTP_${normRef(sfRef)}_` : 'HTTP_',
+      token: Boolean(env(`HTTP_${normRef(sfRef)}_TOKEN`) || env('HTTP_BEARER_TOKEN')),
+      baseUrl: env(`HTTP_${normRef(sfRef)}_BASE_URL`) || env('HTTP_BASE_URL') || null,
+      configured: Boolean(httpCredentials(sfRef) || env('HTTP_BASE_URL') || env('HTTP_BEARER_TOKEN')),
     },
   };
 }
@@ -117,4 +175,4 @@ function secretValues() {
 
 const SF_UNAVAILABLE_MESSAGE = 'Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled.';
 
-module.exports = { SF_UNAVAILABLE_MESSAGE, config, salesforceCredentials, jiraCredentials, credentialStatus, secretValues, normRef };
+module.exports = { SF_UNAVAILABLE_MESSAGE, config, salesforceCredentials, jiraCredentials, salesforceMcpSettings, commerceCredentials, httpCredentials, postmanSettings, credentialStatus, secretValues, normRef };

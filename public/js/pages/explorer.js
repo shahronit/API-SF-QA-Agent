@@ -12,10 +12,14 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'API explorer' }]);
-      const state = { side: ctx.query.object ? 'objects' : 'templates', req: { method: 'GET', path: '/services/data/v{{apiVersion}}/limits', auth: 'default', headers: '', query: '', body: '', variables: '', apiType: 'REST' }, last: null, object: ctx.query.object || null };
+      const state = { layer: ctx.query.layer === 'frontend' ? 'frontend' : 'backend', side: ctx.query.object ? 'objects' : 'templates', req: { method: 'GET', path: '/services/data/v{{apiVersion}}/limits', auth: 'default', headers: '', query: '', body: '', variables: '', apiType: 'REST' }, last: null, object: ctx.query.object || null };
 
-      view.innerHTML = String(h`${C.pageHead('API explorer', h`Send requests to ${p.name} (${p.environment}). Authentication is injected from the secret store; the Authorization header is never shown or accepted.`)}
+      view.innerHTML = String(h`${C.pageHead('Try an API', h`${C.layerTag(state.layer)} ${p.name} (${p.environment}). The access token is added on the server — you never paste it here.`, h`<a class="btn" href="/workflow/postman" data-link>${ic('folder')} Open collection</a>`)}
+        ${C.pageIntro({ what: 'Backend APIs are Salesforce org REST, Apex REST, Bulk and Composite. Frontend / HTTP APIs are custom REST, storefront, middleware and BFF collections in Postman.', next: state.layer === 'frontend' ? 'Review collections below, or open Find HTTP collections in How QA works. Import/export lives under HTTP / Postman.' : 'Pick a Salesforce template or object on the left, click Send, then Save as test if the call is useful. Production writes ask you to confirm.' })}
         ${C.connectionNotice(p)}
+        <div class="mt" style="margin-bottom:var(--space-4)">${C.tabs([{ id: 'backend', label: 'Backend · Salesforce' }, { id: 'frontend', label: 'Frontend · HTTP / Postman' }], state.layer, 'data-layer')}</div>
+        <div data-layer-pane="frontend" class="${state.layer === 'frontend' ? '' : 'hidden'}"><div data-fe>${loading(6)}</div></div>
+        <div data-layer-pane="backend" class="${state.layer === 'backend' ? '' : 'hidden'}">
         <div class="split" style="grid-template-columns:280px minmax(0,1fr)">
           <aside class="card" style="align-self:start;position:sticky;top:72px;max-height:calc(100vh - 96px);overflow:auto">
             <div class="toolbar" style="padding:8px">${C.tabs([{ id: 'templates', label: 'Templates' }, { id: 'saved', label: 'Saved' }, { id: 'objects', label: 'Objects' }], state.side, 'data-side')}</div>
@@ -29,12 +33,13 @@
                 <select class="select" name="auth" aria-label="Authentication" style="width:190px">${[['default', 'Integration user'], ['lowpriv', 'Low-privilege user'], ['none', 'No token'], ['invalid', 'Invalid token']].map(([v, l]) => h`<option value="${v}">${l}</option>`)}</select>
                 <button class="btn primary" data-act="send">${ic('send')} Send</button>
               </div>
-              <div class="mt" data-reqtabs>${C.tabs([{ id: 'body', label: 'Body' }, { id: 'query', label: 'Query' }, { id: 'headers', label: 'Headers' }, { id: 'variables', label: 'Variables' }], 'body', 'data-rt')}</div>
+              <div class="mt" data-reqtabs>${C.tabs([{ id: 'body', label: 'Body' }, { id: 'query', label: 'Parameters' }, { id: 'headers', label: 'Headers' }, { id: 'variables', label: 'Variables' }], 'body', 'data-rt')}</div>
               ${['body', 'query', 'headers', 'variables'].map((k) => h`<div data-rp="${k}" class="${k === 'body' ? '' : 'hidden'}"><textarea class="input mono" rows="${k === 'body' ? 10 : 5}" name="${k}" spellcheck="false" placeholder="${{ body: 'JSON, XML (SOAP) or CSV body', query: '{ "q": "SELECT Id FROM Account LIMIT 5" }', headers: '{ "Sforce-Call-Options": "client=qa-platform" } — no Authorization header', variables: '{ "accountId": "001..." }  — {{apiVersion}} and {{$uuid}} etc. resolve automatically' }[k]}"></textarea></div>`)}
               <div class="row mt" style="gap:8px"><span class="small muted" data-reqhint></span><span class="spacer"></span><button class="btn sm" data-act="save">${ic('plus')} Save request</button><button class="btn sm" data-act="totest" disabled>${ic('wand')} Create test case from response</button></div>
             </div></div>
             <div class="card" data-response>${empty({ icon: 'send', title: 'No request sent yet', text: 'Choose a template or object on the left, or type an endpoint, then click Send.' })}</div>
           </div>
+        </div>
         </div>`);
 
       const f = (n) => view.querySelector(`[name=${n}]`);
@@ -42,10 +47,40 @@
         Object.assign(state.req, r);
         f('method').value = state.req.method; f('path').value = state.req.path; f('auth').value = state.req.auth || 'default';
         for (const k of ['body', 'query', 'headers', 'variables']) f(k).value = J(state.req[k]);
-        view.querySelector('[data-reqhint]').textContent = state.req.note || (state.req.apiType ? `API type: ${state.req.apiType}` : '');
+        view.querySelector('[data-reqhint]').textContent = state.req.note || (state.req.apiType ? `Backend API · ${state.req.apiType}` : 'Backend API · Salesforce');
       };
       setReq(state.req);
-      on(view, 'click', '[data-rt]', (e, el) => { view.querySelector('[data-reqtabs]').innerHTML = String(C.tabs([{ id: 'body', label: 'Body' }, { id: 'query', label: 'Query' }, { id: 'headers', label: 'Headers' }, { id: 'variables', label: 'Variables' }], el.dataset.rt, 'data-rt')); view.querySelectorAll('[data-rp]').forEach((x) => x.classList.toggle('hidden', x.dataset.rp !== el.dataset.rt)); });
+      on(view, 'click', '[data-rt]', (e, el) => { view.querySelector('[data-reqtabs]').innerHTML = String(C.tabs([{ id: 'body', label: 'Body' }, { id: 'query', label: 'Parameters' }, { id: 'headers', label: 'Headers' }, { id: 'variables', label: 'Variables' }], el.dataset.rt, 'data-rt')); view.querySelectorAll('[data-rp]').forEach((x) => x.classList.toggle('hidden', x.dataset.rp !== el.dataset.rt)); });
+      on(view, 'click', '[data-layer]', (e, el) => {
+        state.layer = el.dataset.layer;
+        QA.router.setQuery({ layer: state.layer === 'backend' ? '' : 'frontend', object: state.layer === 'backend' ? (state.object || '') : '' });
+        view.querySelectorAll('[data-layer]').forEach((b) => { b.classList.toggle('on', b === el); b.setAttribute('aria-selected', b === el); });
+        view.querySelectorAll('[data-layer-pane]').forEach((pane) => pane.classList.toggle('hidden', pane.dataset.layerPane !== state.layer));
+        if (state.layer === 'frontend') drawFrontend();
+      });
+      async function drawFrontend() {
+        const box = view.querySelector('[data-fe]');
+        if (!box) return;
+        box.innerHTML = String(loading(6));
+        try {
+          const r = await api.get(`/api/projects/${p.id}/postman/collections`);
+          const items = r.items || [];
+          box.innerHTML = String(h`<div class="card"><div class="card-head"><h2>Frontend / HTTP collections</h2><span class="sub">${r.source || ''} · ${r.workspace || 'local'}</span></div>
+            <div class="card-body">
+              <p class="small wrap">These collections are the frontend HTTP layer (custom REST, storefront, middleware, BFF). Salesforce org APIs stay on the Backend tab.</p>
+              <div class="row wrap mt"><a class="btn primary" href="/workflow/postman" data-link>${ic('search')} Find collections</a><a class="btn" href="/automation" data-link>Import / export Postman</a><a class="btn" href="/projects/${p.id}?tab=connection" data-link>Postman connection</a></div>
+            </div>
+            ${items.length ? QA.ui.table({ rows: items, columns: [
+              { key: 'name', label: 'Collection', render: (c) => h`<div class="wrap">${c.name}</div><div class="cell-sub">${c.source || ''} · ${c.requestCount != null ? `${c.requestCount} requests` : ''}</div>` },
+              { key: 'workspace', label: 'Workspace', render: (c) => c.workspace || '—' },
+              { key: 'open', label: '', render: (c) => h`<a class="btn xs" href="/workflow/postman" data-link>Open</a>` },
+            ] }) : empty({ icon: 'folder', title: 'No collections yet', text: 'Reuse local collections or connect a Postman workspace, then Test Postman on Connections.', action: h`<a class="btn primary" href="/projects/${p.id}?tab=connection" data-link>Open Connections</a>` })}
+          </div>`);
+        } catch (e) {
+          box.innerHTML = String(h`<div class="card"><div class="card-body">${errorBox(e, { compact: true })}<div class="row mt"><a class="btn primary" href="/projects/${p.id}?tab=connection" data-link>Connect Postman</a><a class="btn" href="/workflow/postman" data-link>Find collections</a></div></div></div>`);
+        }
+      }
+      if (state.layer === 'frontend') drawFrontend();
 
       // Sidebar
       const sideBody = view.querySelector('[data-side-body]');

@@ -26,7 +26,7 @@ async function api(method, url, body) {
 
 test.before(async () => {
   server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(__dirname, '..', 'index.js')], {
-    env: { ...process.env, QA_DB_FILE: DB, PORT: String(PORT), HOST: '127.0.0.1' },
+    env: { ...process.env, QA_DB_FILE: DB, PORT: String(PORT), HOST: '127.0.0.1', SEED_DEMO: 'true' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
@@ -163,4 +163,54 @@ test('run reports expose classification, impact, retest, risks and automation as
     if (format === 'xlsx') assert.equal(buf.subarray(0, 2).toString(), 'PK');
     if (format === 'html') assert.match(buf.toString(), /Risks/);
   }
+});
+
+test('connections expose Salesforce MCP, Jira and Commerce Cloud and can save non-secret config', async () => {
+  const c = await api('GET', '/api/projects/PRJ-001/connection');
+  assert.equal(c.status, 200);
+  assert.ok(c.body.credentials.salesforce);
+  assert.ok(c.body.credentials.jira);
+  assert.ok(c.body.credentials.commerce);
+  assert.ok(c.body.credentials.postman);
+  assert.equal(c.body.view.commerce.status, 'off');
+  const saved = await api('PUT', '/api/projects/PRJ-001/connection', {
+    commerce: { enabled: true, siteId: 'RefArch', orgId: 'f_ecom_zzte_001', shortCode: 'demo', host: 'demo-commerce.example.com' },
+  });
+  assert.equal(saved.status, 200, saved.text.slice(0, 200));
+  assert.equal(saved.body.connection.commerce.status, 'demo');
+  const test = await api('POST', '/api/projects/PRJ-001/connection/test');
+  assert.equal(test.status, 200);
+  assert.equal(test.body.commerce.ok, true);
+  assert.ok(test.body.postman);
+  await api('PUT', '/api/projects/PRJ-001/connection', { commerce: { enabled: false } });
+});
+
+test('workflow state persists and Postman discovery reuses collections', async () => {
+  const wf = await api('GET', '/api/projects/PRJ-001/workflow');
+  assert.equal(wf.status, 200, wf.text.slice(0, 300));
+  assert.equal(wf.body.steps.length, 13);
+  assert.ok(wf.body.steps.every((s) => s.status));
+  const vis = await api('PUT', '/api/projects/PRJ-001/workflow', { currentStep: 'postman' });
+  assert.equal(vis.body.currentStep, 'postman');
+  const again = await api('GET', '/api/projects/PRJ-001/workflow');
+  assert.equal(again.body.currentStep, 'postman');
+  const found = await api('GET', '/api/projects/PRJ-001/postman/collections');
+  assert.equal(found.status, 200, found.text.slice(0, 300));
+  assert.ok(Array.isArray(found.body.items));
+  const analyzed = await api('POST', '/api/projects/PRJ-001/postman/analyze', {});
+  assert.equal(analyzed.status, 200, analyzed.text.slice(0, 400));
+  assert.ok(['reuse', 'update', 'create'].includes(analyzed.body.action));
+  if (analyzed.body.diff) {
+    assert.ok(analyzed.body.diff.summary);
+    assert.ok(!JSON.stringify(analyzed.body).includes('Account 2'));
+  }
+});
+
+test('sync-and-generate produces proposals from Jira tickets', async () => {
+  const r = await api('POST', '/api/stories/sync-and-generate?projectId=PRJ-001', { jql: 'text ~ "Create Contact through Salesforce API"', onlyNeedingApi: true });
+  assert.equal(r.status, 200, r.text.slice(0, 300));
+  assert.ok(r.body.synced >= 1);
+  assert.ok(r.body.proposals.length >= 1);
+  assert.ok(r.body.proposals[0].id.startsWith('GEN-'));
+  assert.ok(r.body.proposals[0].tests > 0);
 });

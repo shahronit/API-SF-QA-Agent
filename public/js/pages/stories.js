@@ -32,8 +32,9 @@
     const p = QA.state.project;
     QA.router.setCrumbs([{ label: 'Jira stories' }]);
     const jira = p.connection && p.connection.jira;
-    view.innerHTML = String(h`${C.pageHead('Stories & Test Generation', h`${jira ? `Syncing from ${p.jiraProjectKey}.` : 'Jira not configured.'} Select a story to generate API tests.`,
-      h`<button class="btn" data-act="add">${ic('plus')} Add story</button><button class="btn primary" data-act="sync">${ic('zap')} Sync stories</button>`)}
+    view.innerHTML = String(h`${C.pageHead('Jira tickets', h`${jira ? `Tickets from ${p.jiraProjectKey}.` : 'Jira is not connected yet.'} Open a ticket to generate API tests from it.`,
+      h`<button class="btn" data-act="add">${ic('plus')} Add ticket</button><button class="btn" data-act="sync">${ic('zap')} Pull from Jira</button><button class="btn primary" data-act="gen-jira">${ic('wand')} Generate tests from a ticket</button>`)}
+      ${C.pageIntro({ what: 'These are the Jira stories for this project. Each one can become a set of API tests. Uses Cursor CLI / Gemini CLI if you are logged in, with this Jira ticket (and project integration docs) as context. You still review and approve.', next: jira ? 'Click Pull from Jira, then open a ticket and generate tests. You review and approve before anything runs.' : 'Add a Jira site on the project Connections tab, or add a ticket by hand to try the flow in Demo.' })}
       <div data-list></div>`);
     let sprints = [];
     const list = C.listController(view.querySelector('[data-list]'), {
@@ -42,7 +43,7 @@
       fetch: async (q) => { const r = await api.get(`/api/stories${api.qs({ projectId: p.id, ...q })}`); if (r.sprints && r.sprints.join() !== sprints.join()) { sprints = r.sprints; setTimeout(() => list.renderToolbar(), 0); } return r; },
       rowAttrs: (r) => `data-id="${esc(r.id)}"`,
       onRow: (r) => QA.router.go(`/stories/${r.key}`),
-      emptyState: () => empty({ icon: 'jira', title: 'No stories yet', text: 'Sync stories from Jira with a JQL query, or add one manually.', action: h`<button class="btn primary" data-act="sync">${ic('refresh')} Sync from Jira</button>` }),
+      emptyState: () => empty({ icon: 'jira', title: 'No tickets yet', text: 'Pull tickets from Jira, or add one by hand to try generating tests.', action: h`<button class="btn primary" data-act="sync">${ic('refresh')} Pull from Jira</button>` }),
       columns: [
         { key: 'key', label: 'Key', sortable: true, render: (r) => h`<b class="mono small">${r.key}</b>` },
         { key: 'summary', label: 'Summary', sortable: true, render: (r) => h`<div class="cell-title">${r.summary}</div><div class="cell-sub">${(r.components || []).join(', ')}${r.assignee ? ` · ${r.assignee}` : ''}</div>` },
@@ -58,7 +59,30 @@
     on(view, 'click', '[data-gen]', (e, el) => generate(el.dataset.gen, el));
     on(view, 'click', '[data-act=sync]', () => syncDialog(list));
     on(view, 'click', '[data-act=add]', () => addDialog(list));
+    on(view, 'click', '[data-act=gen-jira]', () => generateFromJira(list));
     return null;
+  }
+
+  function generateFromJira(list) {
+    const p = QA.state.project;
+    modal({
+      title: 'Generate API scripts from Jira tickets',
+      subtitle: `Syncs ${p.jiraProjectKey || 'the Jira project'} then proposes executable tests for tickets that need API coverage. Uses Cursor CLI / Gemini CLI if you are logged in, with this Jira ticket (and project integration docs) as context. You still review and approve.`,
+      body: h`<label class="field"><span>JQL (optional)</span><textarea class="input mono" rows="3" name="jql" placeholder="project = ${p.jiraProjectKey || 'PROJ'} AND issuetype = Story"></textarea></label>
+        <label class="field"><span class="row" style="gap:8px;align-items:center"><input type="checkbox" name="onlyApi" checked> Only tickets classified as needing API testing</span></label>`,
+      foot: h`<button class="btn" data-close>Cancel</button><button class="btn primary" data-go>${ic('wand')} Sync and generate</button>`,
+      onMount(el, close) {
+        el.querySelector('[data-go]').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          try {
+            const r = await api.post(`/api/stories/sync-and-generate?projectId=${p.id}`, { jql: el.querySelector('[name=jql]').value.trim() || undefined, onlyNeedingApi: el.querySelector('[name=onlyApi]').checked });
+            close();
+            toast(`Synced ${r.synced} · generated ${r.proposals.length} proposal(s).`, 'ok', 'Scripts generated');
+            list.reload();
+            if (r.proposals[0]) QA.router.go(`/stories/${r.proposals[0].storyKey}?proposal=${r.proposals[0].id}`);
+          } catch (err) { toastError(err, 'Generate from Jira failed'); }
+        }));
+      },
+    });
   }
 
   function syncDialog(list) {
@@ -116,6 +140,7 @@
     const ac = String(s.acceptanceCriteria || '').split('\n').map((x) => x.replace(/^\s*[-*•]\s*/, '').trim()).filter(Boolean);
     view.innerHTML = String(h`${C.pageHead(h`<span class="mono" style="font-size:20px">${s.key}</span> ${s.summary}`, h`${s.issueType || 'Story'} · ${s.status} · ${s.priority || 'No priority'} · ${s.sprint || 'No sprint'}${s.assignee ? ` · ${s.assignee}` : ''} · synced ${fmt.ago(s.syncedAt)}`,
         h`${s.url ? h`<a class="btn" href="${s.url}" target="_blank" rel="noopener">${ic('external')} Open in Jira</a>` : ''}<button class="btn" data-act="impact">${ic('target')} Regression impact</button><button class="btn" data-act="run" ${cov.tests ? '' : 'disabled'}>${ic('play')} Run story tests</button><button class="btn primary" data-act="gen">${ic('wand')} Generate API tests</button>`)}
+      <p class="small muted" style="margin:0 0 12px">Uses Cursor CLI / Gemini CLI if you are logged in, with this Jira ticket (and project integration docs) as context. You still review and approve.</p>
       <div class="grid g-21">
         <div class="card"><div class="card-head"><h2>Requirement</h2></div><div class="card-body">
           <p style="margin-top:0;white-space:pre-wrap">${s.description || 'No description.'}</p>
@@ -227,7 +252,10 @@
       const selected = Object.fromEntries(sel.map((s, i) => [i, [...s].sort((x, y) => x - y)]));
       try {
         const r = await api.post(`/api/proposals/${pr.id}/approve`, { selected, postToJira });
-        toast(h`${r.tests} test cases in ${r.scenarios} scenarios saved.${r.jira ? (r.jira.ok ? ` Jira ${pr.storyKey} updated.` : ` Jira was not updated: ${r.jira.title}`) : ''}`, r.jira && !r.jira.ok ? 'warn' : 'ok', 'Proposal approved');
+        const pm = r.postman || {};
+        const pmBit = pm.mcp ? ` Synced to Postman collection${pm.name ? ` “${pm.name}”` : ''}.`
+          : (pm.notice ? ` ${pm.notice}` : ' Saved locally — connect Postman MCP to push the collection.');
+        toast(h`${r.tests} test cases in ${r.scenarios} scenarios saved.${pmBit}${r.jira ? (r.jira.ok ? ` Jira ${pr.storyKey} updated.` : ` Jira was not updated: ${r.jira.title}`) : ''}`, (r.jira && !r.jira.ok) || (pm.ok === false) ? 'warn' : 'ok', 'Proposal approved');
         QA.router.go(`/stories/${pr.storyKey}`);
       } catch (err) { toastError(err, 'Approval failed'); }
     }));

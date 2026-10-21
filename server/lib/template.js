@@ -31,32 +31,42 @@ function dynamicValue(name) {
   return undefined;
 }
 
-/** Tokenise a JSONPath subset. */
+/** Tokenise a JSONPath subset (`$.a.b[0].c`, `$[*].id`). */
 function parsePath(p) {
   if (!p || p === '$') return [];
   const s = p.startsWith('$') ? p.slice(1) : '.' + p;
   const tokens = [];
-  const rx = /\.([A-Za-z0-9_$\-]+)|\[(\d+)\]|\[['"]([^'"]+)['"]\]/g;
+  const rx = /\.([A-Za-z0-9_$\-]+)|\[(\d+)\]|\[\*\]|\[['"]([^'"]+)['"]\]/g;
   let m;
   let last = 0;
   while ((m = rx.exec(s))) {
     if (m.index !== last) throw new Error(`Unsupported JSONPath segment in "${p}"`);
-    tokens.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? Number(m[2]) : m[3]);
+    if (m[0] === '[*]') tokens.push('*');
+    else tokens.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? Number(m[2]) : m[3]);
     last = rx.lastIndex;
   }
   if (last !== s.length) throw new Error(`Unsupported JSONPath "${p}"`);
   return tokens;
 }
 
-function getPath(obj, p) {
-  const tokens = parsePath(p);
-  let cur = obj;
-  for (const t of tokens) {
+function walkPath(cur, tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
     if (cur === null || cur === undefined) return undefined;
+    if (t === '*') {
+      if (!Array.isArray(cur)) return undefined;
+      const rest = tokens.slice(i + 1);
+      if (!rest.length) return cur;
+      return cur.map((item) => walkPath(item, rest));
+    }
     if (t === 'length' && (Array.isArray(cur) || typeof cur === 'string')) { cur = cur.length; continue; }
     cur = cur[t];
   }
   return cur;
+}
+
+function getPath(obj, p) {
+  return walkPath(obj, parsePath(p));
 }
 
 function lookup(name, vars) {

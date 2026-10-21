@@ -2,7 +2,7 @@
 /** Test execution: start/stop runs, stream progress (SSE), results, analysis, explorer. */
 const { route, HttpError, sse } = require('../http');
 const { repo, all, get, now, audit, nextId, decode } = require('../db');
-const { salesforceFor } = require('../connectors');
+const { connectorFor, isCommerceRequest, isHttpRequest } = require('../connectors');
 const runner = require('../engine/runner');
 const { checkOperation, isProduction, PRODUCTION_WARNING } = require('../engine/safety');
 const { summarise } = require('../engine/analyzer');
@@ -161,11 +161,29 @@ route('POST', '/api/explorer/execute', async (ctx) => {
   if (!b.path) throw new HttpError(400, 'Endpoint path is required.', { action: 'Enter a path such as /services/data/v{{apiVersion}}/limits' });
   const safety = checkOperation(p, { method, path: b.path, body: b.body }, { confirmProductionWrites: b.confirmProductionWrites, confirmDelete: b.confirmDelete });
   if (safety) throw new HttpError(409, safety.title, safety);
-  const sf = salesforceFor(p);
+  const sf = connectorFor(p, { apiType: b.apiType, path: b.path });
   if (!sf.available) throw new HttpError(503, sf.unavailableExplanation().title, sf.unavailableExplanation());
-  const vars = { apiVersion: p.apiVersion, runId: 'explorer', ...((p.testDataConfig || {}).variables || {}), ...(b.variables || {}) };
+  const cc = (p.integrationConfig && p.integrationConfig.commerce) || {};
+  const httpCfg = (p.integrationConfig && p.integrationConfig.http) || {};
+  const { restApiOrigin, ensureSalesforceRestPath } = require('../connectors/salesforce-org');
+  const vars = {
+    apiVersion: p.apiVersion, runId: 'explorer',
+    instanceUrl: restApiOrigin(p.instanceUrl) || p.instanceUrl || '',
+    ccSiteId: cc.siteId || (p.mode === 'demo' ? 'RefArch' : ''),
+    ccOrgId: cc.orgId || '', ccShortCode: cc.shortCode || '',
+    ocapiVersion: cc.ocapiVersion || 'v24_5',
+    httpBaseUrl: String(httpCfg.baseUrl || '').replace(/\/$/, ''),
+    ...((p.testDataConfig || {}).variables || {}), ...(b.variables || {}),
+  };
+  if (vars.siteId && !/^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(String(vars.siteId))) {
+    vars.ccSiteId = vars.ccSiteId || vars.siteId;
+    delete vars.siteId;
+  }
   const missing = new Set();
-  const path = interpolate(b.path, vars, missing);
+  let path = interpolate(b.path, vars, missing);
+  if (!isCommerceRequest({ apiType: b.apiType, path }) && !isHttpRequest({ apiType: b.apiType, path })) {
+    path = ensureSalesforceRestPath(path, p.apiVersion);
+  }
   let body; let bodyRaw;
   if (typeof b.body === 'string' && b.body.trim()) {
     const text = interpolate(b.body, vars, missing);
@@ -209,7 +227,7 @@ route('POST', '/api/explorer/generate-test', (ctx) => {
   if (typeof b.body === 'string' && b.body.trim()) { try { body = JSON.parse(b.body); } catch { bodyRaw = b.body; } } else if (b.body && typeof b.body === 'object') body = b.body;
   const draft = {
     title: b.title || `${String(b.method || 'GET').toUpperCase()} ${String(b.path || '').split('?')[0].split('/').slice(-2).join('/')}`,
-    apiType: b.apiType || 'REST', method: String(b.method || 'GET').toUpperCase(), endpoint: String(b.path || '').replace(`/v${p.apiVersion}/`, '/v{{apiVersion}}/'),
+    apiType: b.apiType || (/^https?:\/\//i.test(String(b.path || '')) ? 'HTTP' : 'REST'), method: String(b.method || 'GET').toUpperCase(), endpoint: String(b.path || '').replace(`/v${p.apiVersion}/`, '/v{{apiVersion}}/'),
     query: b.query || {}, headers: b.headers || {}, body, bodyRaw, auth: b.auth || 'default', assertions,
     testType: (res.status || 200) >= 400 ? 'Negative' : 'Functional', label: 'ASSUMED', status: 'ready', storyKey: b.storyKey || null,
     description: 'Generated from an API Explorer request. Review assertions before adding to regression.',
@@ -257,6 +275,16 @@ route('GET', '/api/explorer/templates', (ctx) => {
     { group: 'SOAP API', name: 'Apex SOAP web service (replace ClassName / method)', method: 'POST', apiType: 'SOAP', path: '/services/Soap/class/ClassName', headers: { 'Content-Type': 'text/xml; charset=UTF-8', SOAPAction: '""' }, body: '<?xml version="1.0" encoding="utf-8"?>\n<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:cls="http://soap.sforce.com/schemas/class/ClassName">\n  <soapenv:Header><cls:SessionHeader><cls:sessionId>{{sessionId}}</cls:sessionId></cls:SessionHeader></soapenv:Header>\n  <soapenv:Body><cls:methodName><cls:arg>value</cls:arg></cls:methodName></soapenv:Body>\n</soapenv:Envelope>', note: 'Apex SOAP: an Apex class exposing `webservice static` methods. Replace ClassName and methodName with your own class — the WSDL is available from Setup → Apex Classes → Generate WSDL.' },
     { group: 'Change Data Capture', name: 'CDC: subscribe via Pub/Sub API', method: 'GET', path: `${v}/sobjects/ContactChangeEvent/describe`, note: 'CDC/Platform Event subscription uses the gRPC Pub/Sub API, which is outside this HTTP explorer. Use this describe to verify the channel exists, then validate downstream effects with SOQL.' },
     { group: 'Metadata API', name: 'Metadata API (SOAP)', method: 'POST', apiType: 'SOAP', path: '/services/Soap/m/{{apiVersion}}', headers: { 'Content-Type': 'text/xml; charset=UTF-8', SOAPAction: '""' }, body: '<?xml version="1.0" encoding="utf-8"?>\n<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:met="http://soap.sforce.com/2006/04/metadata">\n  <soapenv:Header><met:SessionHeader><met:sessionId>{{sessionId}}</met:sessionId></met:SessionHeader></soapenv:Header>\n  <soapenv:Body><met:listMetadata><met:queries><met:type>CustomObject</met:type></met:queries><met:asOfVersion>{{apiVersion}}</met:asOfVersion></met:listMetadata></soapenv:Body>\n</soapenv:Envelope>' },
+    { group: 'Commerce Cloud OCAPI', name: 'OCAPI: product search (live catalog)', method: 'GET', apiType: 'OCAPI', path: '/s/{{ccSiteId}}/dw/shop/v24_5/product_search', query: { q: 'a', count: 8 } },
+    { group: 'Commerce Cloud OCAPI', name: 'OCAPI: get product by id from search', method: 'GET', apiType: 'OCAPI', path: '/s/{{ccSiteId}}/dw/shop/v24_5/products/{{ocapiProductId}}', note: 'Set ocapiProductId from a product_search hit — do not invent a SKU.' },
+    { group: 'Commerce Cloud OCAPI', name: 'OCAPI: create basket', method: 'POST', apiType: 'OCAPI', path: '/s/{{ccSiteId}}/dw/shop/v24_5/baskets', body: {} },
+    { group: 'Commerce Cloud SCAPI', name: 'SCAPI: shopper product search', method: 'GET', apiType: 'SCAPI', path: '/search/shopper-search/v1/organizations/{{ccOrgId}}/product-search', query: { q: 'a', limit: 8 } },
+    { group: 'Commerce Cloud SCAPI', name: 'SCAPI: shopper product by id', method: 'GET', apiType: 'SCAPI', path: '/product/shopper-products/v1/organizations/{{ccOrgId}}/products/{{scapiProductId}}' },
+    { group: 'Commerce Cloud SCAPI', name: 'SLAS: client credentials token', method: 'POST', apiType: 'SCAPI', path: '/shopper/auth/v1/organizations/{{ccOrgId}}/oauth2/token', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=client_credentials', note: 'Client id/secret are injected from SFCC_<PREFIX>_* — do not paste them here. Browser login is not a SLAS token.' },
+    { group: 'Experience Cloud', name: 'Connect REST: list communities', method: 'GET', path: `${v}/connect/communities` },
+    { group: 'B2B Commerce', name: 'Commerce API: list web stores', method: 'GET', path: `${v}/commerce/webstores` },
+    { group: 'Frontend HTTP', name: 'GET frontend origin', method: 'GET', apiType: 'HTTP', path: '{{httpBaseUrl}}/', note: 'Set the frontend base URL on Connections → Postman / HTTP.' },
+    { group: 'Frontend HTTP', name: 'GET absolute URL (example)', method: 'GET', apiType: 'HTTP', path: 'https://httpbin.org/get', note: 'Replace with your BFF / middleware URL. Auth token comes from HTTP_<PREFIX>_TOKEN if set.' },
   ];
 });
 

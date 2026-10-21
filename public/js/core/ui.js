@@ -164,7 +164,7 @@
 
   // ── States ──
   const loading = (rows = 6) => h`<div class="card-body">${Array.from({ length: rows }, (_, i) => h`<div class="skeleton sk-line" style="width:${90 - (i % 3) * 18}%"></div>`)}</div>`;
-  const empty = ({ icon: i = 'inbox', title, text, action }) => h`<div class="empty">${ic(i)}<h3>${title}</h3>${text ? h`<p>${text}</p>` : ''}${action || ''}</div>`;
+  const empty = ({ icon: i = 'inbox', title, text, action }) => h`<div class="empty">${ic(i)}<h3>${title}</h3>${text ? h`<p>${text}</p>` : ''}${action ? h`<div class="form-actions">${action}</div>` : ''}</div>`;
   /** Actionable error state built from an ApiError: error, cause, evidence, action. */
   function errorBox(err, { compact = false } = {}) {
     const i = (err && err.info) || {};

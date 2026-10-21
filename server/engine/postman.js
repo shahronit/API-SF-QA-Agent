@@ -27,7 +27,8 @@ function rawBody(tc) {
 }
 
 function urlObject(tc) {
-  const raw = toPostmanVars(`{{baseUrl}}${tc.endpoint}`);
+  const ep = String(tc.endpoint || '');
+  const raw = toPostmanVars(/^https?:\/\//i.test(ep) ? ep : `{{baseUrl}}${ep}`);
   const q = Object.entries(tc.query || {}).map(([key, value]) => ({ key, value: toPostmanVars(value) }));
   const pathPart = raw.replace('{{baseUrl}}', '').split('?')[0];
   return {
@@ -197,11 +198,13 @@ function exportCollection(project, testCases) {
 }
 
 function exportEnvironment(project) {
+  const { restApiOrigin, loginOauthOrigin } = require('../connectors/salesforce-org');
+  const apiHost = restApiOrigin(project.instanceUrl) || 'https://your-domain.my.salesforce.com';
   return {
     name: `${project.name} — ${project.environment}`,
     values: [
-      { key: 'baseUrl', value: project.instanceUrl || 'https://your-domain.my.salesforce.com', type: 'default', enabled: true },
-      { key: 'loginUrl', value: project.instanceUrl || 'https://login.salesforce.com', type: 'default', enabled: true },
+      { key: 'baseUrl', value: apiHost, type: 'default', enabled: true },
+      { key: 'loginUrl', value: loginOauthOrigin(project.instanceUrl) || 'https://login.salesforce.com', type: 'default', enabled: true },
       { key: 'apiVersion', value: project.apiVersion, type: 'default', enabled: true },
       { key: 'clientId', value: '', type: 'secret', enabled: true },
       { key: 'clientSecret', value: '', type: 'secret', enabled: true },
@@ -230,7 +233,9 @@ function importCollection(collection) {
   return flattenItems(collection.item).filter((i) => i.request).map((it) => {
     const r = it.request;
     const rawUrl = typeof r.url === 'string' ? r.url : (r.url && r.url.raw) || '';
-    let endpoint = rawUrl.replace(/^\{\{[^}]+\}\}/, '').replace(/^https?:\/\/[^/]+/, '');
+    let endpoint = rawUrl.replace(/^\{\{[^}]+\}\}/, '');
+    const keepAbs = /^https?:\/\//i.test(endpoint) && !/salesforce\.com|force\.com|demandware|commercecloud/i.test(endpoint);
+    if (!keepAbs) endpoint = endpoint.replace(/^https?:\/\/[^/]+/, '');
     const query = {};
     if (endpoint.includes('?')) {
       const [p, qs] = endpoint.split('?');
@@ -249,10 +254,18 @@ function importCollection(collection) {
     for (const m of code.matchAll(/response(?:Time)?\)?\.to\.be\.below\((\d+)\)/g)) assertions.push({ type: 'responseTime', op: 'lt', expected: Number(m[1]) });
     if (!assertions.some((a) => a.type === 'status')) assertions.unshift({ type: 'status', op: 'lt', expected: 400, label: 'HTTP status < 400 (imported default)' });
     const auth = r.auth && r.auth.type === 'noauth' ? 'none' : 'default';
+    const apiType = /\/dw\/(shop|data)\//.test(endpoint) || /\/dw\/oauth2\//.test(endpoint) ? 'OCAPI'
+      : /shopper-(products|search|baskets|auth)/.test(endpoint) ? 'SCAPI'
+      : /apexrest/i.test(endpoint) ? 'Apex REST'
+      : /composite/i.test(endpoint) ? 'Composite'
+      : /Soap/i.test(endpoint) ? 'SOAP'
+      : /\/services\//i.test(endpoint) ? 'REST'
+      : 'HTTP';
     return {
       title: it.name, method: String(r.method || 'GET').toUpperCase(), endpoint: endpoint.replace(/\{\{(\w+)\}\}/g, '{{$1}}'), query, headers, body, bodyRaw, auth,
-      apiType: /apexrest/i.test(endpoint) ? 'Apex REST' : /composite/i.test(endpoint) ? 'Composite' : /Soap/i.test(endpoint) ? 'SOAP' : 'REST',
+      apiType,
       testType: TYPES.find((t) => (it.folder || '').toLowerCase().includes(t.toLowerCase())) || 'Functional', assertions, label: 'ASSUMED',
+      tags: apiType === 'HTTP' ? ['frontend', 'imported'] : ['imported'],
       description: `Imported from Postman collection "${collection.info.name}"${it.folder ? ` / ${it.folder}` : ''}.`,
     };
   });

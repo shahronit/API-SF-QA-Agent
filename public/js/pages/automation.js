@@ -22,7 +22,8 @@
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Automation' }]);
       const m = QA.state.meta;
-      view.innerHTML = String(h`${C.pageHead('Automation', 'Export approved tests as Postman collections, run them with Newman locally or in CI, and import existing collections.')}
+      view.innerHTML = String(h`${C.pageHead('HTTP / Postman', h`${C.layerTag('frontend')} Export approved tests, run Newman, or import a collection you already have.`)}
+        ${C.pageIntro({ what: 'Approved tests are upserted into a Postman collection (via Postman MCP when connected). This page is for download, Newman, and import. Secrets stay empty in the export — fill {{accessToken}} / {{baseUrl}} in the Postman environment.', next: 'Prefer Run on Test Runs (Postman MCP). Use Newman here only if MCP is not connected. Download a collection to inspect it locally.' })}
         <div class="grid g-2">
           <div class="card"><div class="card-head"><h2>Export Postman collection</h2><span class="small muted">Collection v2.1</span></div><div class="card-body stack">
             <div class="field"><span>Priority</span>${C.chipGroup('xp', m.priorities, [])}</div>

@@ -11,8 +11,9 @@
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Test Cases' }]);
       const m = QA.state.meta;
-      view.innerHTML = String(h`${C.pageHead('Test Cases', `Browse, edit, and execute API tests. Run them against ${p.name}.`,
+      view.innerHTML = String(h`${C.pageHead('Tests', `API tests for ${p.name}. Tick rows to run a subset, or open a row to edit it.`,
         h`<button class="btn" data-act="new">${ic('plus')} New test</button><button class="btn primary" data-act="run">${ic('play')} Run selected</button>`)}
+        ${C.pageIntro({ what: 'Every generated or hand-written API test for this project. Filters on the toolbar narrow by priority, type and last result.', next: 'Prefer generating from a Jira ticket. To run: tick the rows you want (or none for the dialog defaults) and click Run selected.' })}
         <div class="card" style="margin-bottom:12px" data-bulk hidden><div class="card-body row wrap" style="gap:10px;padding:10px 14px">
           <b data-selcount></b><span class="spacer"></span>
           <button class="btn sm primary" data-bulk-act="run">${ic('play')} Run selected</button>

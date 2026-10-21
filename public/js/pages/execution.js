@@ -16,8 +16,9 @@
   function renderList(view, ctx) {
     const p = QA.state.project;
     QA.router.setCrumbs([{ label: 'Test Runs' }]);
-    view.innerHTML = String(h`${C.pageHead('Test Runs', `Watch your test executions. Click a run to see detailed results and defects for ${p.name}.`,
-      h`<button class="btn" data-act="failed">${ic('zap')} Re-run failed</button><button class="btn primary" data-act="run">${ic('play')} Start new run</button>`)}
+    view.innerHTML = String(h`${C.pageHead('Test runs', `Each run is one execution of tests against ${p.name}. Open a row for results, Salesforce checks and defects.`,
+      h`<button class="btn" data-act="failed">${ic('zap')} Re-run failed</button><button class="btn primary" data-act="run">${ic('play')} Start a run</button>`)}
+      ${C.pageIntro({ what: 'History of every suite run for this project. Running ones update live.', next: 'Click Start a run to execute approved tests. After a run finishes, open it to see failures and raise defects.' })}
       ${C.connectionNotice(p)}<div data-list></div>`);
     const list = C.listController(view.querySelector('[data-list]'), {
       sort: 'startedAt', dir: 'DESC', searchPlaceholder: 'Search by execution id, label or user',
@@ -71,7 +72,8 @@
     const drawHead = () => {
       const exec = run.passed + run.failed;
       const s = run.summary || {};
-      head.innerHTML = String(h`${C.pageHead(h`<span class="mono" style="font-size:20px">${run.id}</span>`, h`${run.label || 'Execution'} · ${run.environment} · ${run.trigger || 'manual'} by ${run.user} · started ${fmt.date(run.startedAt)}`,
+      const via = run.options && run.options.executor === 'postman-mcp' ? ' · via Postman MCP' : '';
+      head.innerHTML = String(h`${C.pageHead(h`<span class="mono" style="font-size:20px">${run.id}</span>`, h`${run.label || 'Execution'} · ${run.environment} · ${run.trigger || 'manual'} by ${run.user}${via} · started ${fmt.date(run.startedAt)}`,
         h`${badge(run.status)}
           ${state.live ? h`<button class="btn danger-outline" data-act="stop">${ic('stop')} Stop run</button>` : h`
           <button class="btn" data-act="rerun-failed" ${run.failed + run.blocked ? '' : 'disabled'}>${ic('refresh')} Re-run failed</button>

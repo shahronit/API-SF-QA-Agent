@@ -22,6 +22,7 @@ require('./routes/runs');
 require('./routes/defects');
 require('./routes/data');
 require('./routes/reports');
+require('./routes/workflow');
 
 async function main() {
   const { repo } = require('./db');

@@ -13,12 +13,22 @@ List endpoints accept `page`, `pageSize` (≤ 200), `sort`, `dir` (`ASC|DESC`) a
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/api/health` | Liveness and version |
-| GET | `/api/meta` | Environments, API types, test types, priorities, agent modes, current user |
+| GET | `/api/meta` | Environments, API types, test types, priorities, agent modes, workflow steps, current user |
+| GET | `/api/projects/:id/workflow` | Persisted QA lifecycle (13 steps with status) |
+| PUT | `/api/projects/:id/workflow` | Restore/visit a step `{ currentStep }` |
+| GET | `/api/projects/:id/jira/options` | Epics, sprints, issue types and stories for requirement picking |
+| GET | `/api/projects/:id/postman/collections` | Discover existing Postman collections (MCP, local files, generated) |
+| POST | `/api/projects/:id/postman/analyze` | Compare workspace collections with required coverage (reuse before create) |
+| POST | `/api/projects/:id/postman/proposals` | Queue a collection update for approval |
+| POST | `/api/projects/:id/postman/proposals/:pid/approve` | Apply collection changes only after review |
+| POST | `/api/projects/:id/postman/create` | Create a new collection when none is suitable |
 | GET | `/api/projects` | Projects with stats and connection status (`includeArchived=true`) |
 | POST | `/api/projects` | Create. Rejects secret-looking fields; credentials are referenced by `credentialRef` prefix |
 | GET/PUT/DELETE | `/api/projects/:id` | Read, update, archive |
-| GET | `/api/projects/:id/connection` | Which credential variables are set (booleans only) |
-| POST | `/api/projects/:id/connection/test` | Test Salesforce (`/limits`) and Jira (`/myself`) |
+| GET | `/api/projects/:id/connection` | Connection config plus which credential variables are set (booleans only). Includes Salesforce MCP URL/command presence, Jira, Commerce Cloud, and `loopback` |
+| PUT | `/api/projects/:id/connection` | Save non-secret connection config: Salesforce org (`instanceUrl`, `apiVersion`, `mode`, `credentialRef`), MCP (`salesforceMcp.url` / `command`), Jira site/project/JQL, Commerce Cloud (`enabled`, host, site/org/shortCode) |
+| POST | `/api/projects/:id/connection/secrets` | Loopback-only: write Salesforce / Jira / Commerce Cloud secrets into local `.env` (never stored in the database or returned to the browser) |
+| POST | `/api/projects/:id/connection/test` | Test Salesforce org or MCP, Jira (`/myself`), and Commerce Cloud (OCAPI/SCAPI product search when enabled) |
 | GET | `/api/projects/:id/sobjects` | Describe global (labelled VERIFIED or ASSUMED) |
 | GET | `/api/projects/:id/sobjects/:name` | Describe one object (10-minute cache, `refresh=true`) |
 | POST | `/api/projects/:id/soql` | Read-only single `SELECT` |
@@ -31,6 +41,7 @@ List endpoints accept `page`, `pageSize` (≤ 200), `sort`, `dir` (`ASC|DESC`) a
 | --- | --- | --- |
 | GET | `/api/stories` | Stories with coverage (`sprint`, `status`, `q`). Each story includes a `classification` (`needsApiTesting`, `confidence`, `reasons`, label `ASSUMED`) — a heuristic, advisory read on whether the ticket plausibly needs API testing at all |
 | POST | `/api/stories/sync` | Pull stories from Jira (`{ jql? }`). Read-only for Jira |
+| POST | `/api/stories/sync-and-generate` | Sync from Jira then propose API test scripts for tickets that need coverage (`{ jql?, onlyNeedingApi? }`). Returns `{ synced, selected, skipped, proposals, errors }` — nothing is approved until review |
 | POST | `/api/stories` | Add a story manually |
 | GET | `/api/stories/:key` | Story with scenarios, tests, defects, proposals (`refresh=true` re-reads Jira) |
 | POST | `/api/generate` | `{ storyKey }` → proposal with analysis (including `classification`) and scenarios. Generation always proceeds regardless of classification; nothing is saved as tests yet |

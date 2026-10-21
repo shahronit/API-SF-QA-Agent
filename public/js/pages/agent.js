@@ -8,6 +8,8 @@
 
   const EXAMPLES = [
     'Analyze Jira story DEMO-101 and generate Salesforce API test cases.',
+    'GET https://httpbin.org/get',
+    'Run frontend HTTP tests.',
     'Test creating a Contact without a LastName.',
     'Check what happens with an invalid email on Contact.',
     'Verify Account rejects a value over the maximum field length.',
@@ -30,7 +32,8 @@
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Agent console' }]);
       const modes = QA.state.meta.modes;
-      view.innerHTML = String(h`${C.pageHead('Agent console', h`Describe a scenario in plain language — e.g. "Test creating a Contact without a LastName" — and the agent builds the test, runs it against ${p.name} and shows you the result right here. It also picks a mode — ${modes.join(', ')} — for broader requests. Jira defects and production writes always wait for your confirmation.`)}
+      view.innerHTML = String(h`${C.pageHead('Ask the assistant', h`Type what you want in plain language — for example “Test creating a Contact without a LastName”. The assistant builds or runs work against ${p.name} and shows the result here.`)}
+        ${C.pageIntro({ what: `This is a command bar, not a free-form AI tester. It matches phrases to Discover / Generate / Execute. Generation uses the Jira story + Salesforce describe engine (Cursor/Gemini only if you are logged in). After you approve tests, Execute sends real HTTP to Salesforce, Experience/B2B, SFCC, or your frontend origin.`, next: 'Paste an https URL to run it now, or “Analyze PROJ-123” after syncing Jira. Defects and production writes always wait for your confirmation.' })}
         <div class="grid g-21"><div class="card" style="display:flex;flex-direction:column;min-height:560px">
           <div class="agent-log card-body" data-log style="flex:1;overflow-y:auto"></div>
           <form class="card-body row" data-form style="border-top:1px solid var(--border);gap:8px"><label class="sr-only" for="cmd">Command</label><input class="input" id="cmd" name="cmd" autocomplete="off" placeholder="e.g. Run the Account API regression suite in QA" style="flex:1"><button class="btn primary" type="submit">${ic('send')} Send</button></form>

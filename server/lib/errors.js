@@ -152,8 +152,9 @@ const SF_CODES = {
 const HTTP_DEFAULTS = {
   400: ['Bad request', 'The request was rejected by the server as invalid.', 'Inspect the response body for the error code and fix the payload or parameters.', 'data'],
   401: ['Not authenticated', 'No valid credentials were presented.', 'Re-authenticate and confirm the token is being sent in the Authorization header.', 'authentication'],
-  403: ['Forbidden', 'The authenticated user is not permitted to perform this operation.', 'Review profile, permission sets and connected app scopes.', 'authorization'],
+  403: ['Forbidden', 'The authenticated user is not permitted to perform this operation — or the request hit a login host instead of the org API host.', 'Use the org *.my.salesforce.com instance URL (not login.salesforce.com). Review profile, permission sets and connected app scopes.', 'authorization'],
   404: ['Not found', 'The endpoint or record does not exist.', 'Verify the URL, API version and record id.', 'data'],
+  410: ['Gone', 'Salesforce returned 410 because this URL is a Lightning/UI or login host, a retired API version, or a path missing /services/data/vXX.X.', 'Call REST on *.my.salesforce.com with /services/data/v{{apiVersion}}/… — not lightning.force.com or login.salesforce.com.', 'test design'],
   405: ['Method not allowed', 'This HTTP method is not supported on this resource.', 'Use the method documented for the endpoint.', 'test design'],
   409: ['Conflict', 'The request conflicts with the current state of the resource.', 'Check for concurrent updates or duplicate keys.', 'data'],
   415: ['Unsupported media type', 'The Content-Type header does not match what the endpoint expects.', 'Send application/json (REST) or text/xml (SOAP).', 'test design'],

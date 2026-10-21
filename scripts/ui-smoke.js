@@ -98,7 +98,7 @@ async function main() {
     const QA = win.QA;
     const runs = await (await fetch(`${BASE}/api/runs?projectId=PRJ-001&pageSize=1`)).json();
     const latest = runs.items[0].id;
-    const routes = ['/', '/?scope=all', '/projects', '/projects/PRJ-001', '/projects/PRJ-001?tab=connection', '/projects/PRJ-001?tab=integration', '/stories', '/stories/DEMO-102', '/stories/DEMO-102?proposal=GEN-0002', '/scenarios', '/testcases', '/testcases?id=TC-00028', '/execution', `/execution/${latest}`, `/execution/${latest}?tab=analysis`, `/execution/${latest}?tab=data`, '/defects', '/traceability', '/regression?story=DEMO-102', '/explorer', '/explorer?object=Account', `/explorer?fromResult=${latest}-0027`, '/testdata', '/contracts', '/reports', '/automation', '/insights', '/agent', '/logs', '/nope'];
+    const routes = ['/', '/?scope=all', '/workflow', '/workflow/project', '/workflow/postman', '/projects', '/projects/new', '/projects/PRJ-001', '/projects/PRJ-001?tab=connection', '/projects/PRJ-001?tab=integration', '/stories', '/stories/DEMO-102', '/stories/DEMO-102?proposal=GEN-0002', '/scenarios', '/testcases', '/testcases?id=TC-00028', '/execution', `/execution/${latest}`, `/execution/${latest}?tab=analysis`, `/execution/${latest}?tab=data`, '/defects', '/traceability', '/regression?story=DEMO-102', '/explorer', '/explorer?object=Account', `/explorer?fromResult=${latest}-0027`, '/testdata', '/contracts', '/reports', '/automation', '/insights', '/agent', '/logs', '/nope'];
     for (const r of routes) {
       const before = problems.length;
       QA.router.go(r);
@@ -132,6 +132,16 @@ async function main() {
       const desc = modal.querySelector('[name=description]').value;
       if (/Bearer [A-Za-z0-9._-]{20,}|00D[A-Za-z0-9]{12,}!/.test(desc)) throw new Error('secret in defect description');
       doc.getElementById('overlay-root').innerHTML = '';
+    });
+    await step('projects list exposes New project', async () => {
+      QA.router.go('/projects'); await idle(win);
+      if (!$('#view [data-act=new]')) throw new Error('new project control missing on /projects');
+    });
+    await step('new project page is a real form', async () => {
+      QA.router.go('/projects/new'); await idle(win);
+      if (!$('#view h1') || !/New project/i.test($('#view h1').textContent)) throw new Error(`expected New project heading, got ${$('#view h1') && $('#view h1').textContent}`);
+      if (!$('#view [name=name]') || !$('#view [data-go]')) throw new Error('create form missing name or submit');
+      if (!$('nav a[href="/projects/new"]')) throw new Error('sidebar New project link missing');
     });
     await step('run dialog opens with chips', async () => {
       QA.router.go('/testcases'); await idle(win);

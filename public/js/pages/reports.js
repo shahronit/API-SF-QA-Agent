@@ -10,7 +10,9 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Reports' }]);
-      view.innerHTML = String(h`${C.pageHead('Reports', 'Execution reports for stakeholders. Credentials and tokens are masked in every format.')}<div data-body>${loading(8)}</div>`);
+      view.innerHTML = String(h`${C.pageHead('Reports', 'A stakeholder pack for one test run. Credentials and tokens are masked in every download.')}
+        ${C.pageIntro({ what: 'Pick a completed run, preview the summary, then download PDF, Excel, CSV or HTML.', next: 'Choose the execution in the list. If none exist yet, run tests first.' })}
+        <div data-body>${loading(8)}</div>`);
       const body = view.querySelector('[data-body]');
       let runs;
       try { runs = (await api.get(`/api/runs${api.qs({ projectId: p.id, pageSize: 50 })}`)).items; } catch (e) { body.innerHTML = String(errorBox(e)); return null; }

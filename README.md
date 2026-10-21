@@ -11,7 +11,7 @@ cp .env.example .env        # optional for demo mode; required for real orgs
 npm start                   # http://127.0.0.1:4317
 ```
 
-On first start the server seeds five demo projects — Acme Sales Cloud (QA), Acme Service Cloud (UAT), Acme Production Smoke (read-only Production), Globex Commerce (an unconfigured live SIT project), and Northwind Retail — Order Management (Development) — with 13 realistic Jira stories (contact/lead/invoice sync, a Stripe payment webhook, duplicate-prevention rules, a Bulk API 2.0 migration job, Platform Event fan-out, wholesale onboarding), approved suites, 14 days of execution history and two defects. Demo mode uses a built-in Salesforce simulator and a local Jira simulator, so every workflow works without credentials. The demo deliberately contains four realistic defects (a flow overwriting `Account.Rating`, an Apex REST 500 on duplicate invoices, a slow Case SOQL breaching the SLA, and a lead endpoint that drops `LeadSource`) so failure analysis, data validation and defect drafting have something real to show.
+The workspace starts empty. Create a project from **New project**, or load sample data with `npm run seed` (Acme / Globex / Northwind projects, Jira stories, approved suites and execution history against the built-in Salesforce simulator). Set `SEED_DEMO=true` only if you want that sample loaded automatically when the database has no projects.
 
 | Command | Purpose |
 | --- | --- |
@@ -34,7 +34,17 @@ SF_ACME_QA_CLIENT_SECRET=…
 JIRA_EMAIL=…            JIRA_API_TOKEN=…
 ```
 
-Create a project under **Projects → New project**, choose **Live** mode, set the environment, instance URL, API version and the prefix (`ACME_QA` above), then open **Connections → Test connections**. The Connections tab shows only whether each variable is set. An optional `_LOWPRIV_` credential set enables authorization, FLS and record-access tests.
+The left sidebar **QA workflow** is the primary path: Project Setup → Jira Requirement → Salesforce Connection → API Discovery → Postman Collection → Test Generation → Review → Approval → Execution → Salesforce Validation → Results → Jira Defects → Reports. Each step shows whether it is pending, running, complete, failed, blocked, or waiting for approval. Returning to a project restores the last step.
+
+Open **Projects → Connections** (or **New project**) and connect:
+
+1. **Salesforce org** — instance URL, API version, credential prefix, plus optional **MCP** (HTTP URL or stdio command such as `npx -y @salesforce/mcp`). MCP is used for live describe/SOQL; running tests still needs org OAuth (`client_credentials`, JWT or refresh token).
+2. **Jira** — site URL and project key. **Sync tickets and generate API scripts** pulls issues by JQL and proposes executable tests for tickets that need API coverage. Review each proposal before approve; nothing is posted to Jira unless you opt in.
+3. **Postman** — MCP URL/command and workspace. Existing collections are searched and reused before a new one is created; collection updates need approval.
+4. **Commerce Cloud** — optional. Enable OCAPI/SCAPI testing, set host, site ID, org ID and short code. Secrets use `SFCC_<PREFIX>_CLIENT_ID` / `_CLIENT_SECRET` (SLAS or OCAPI).
+5. **Salesforce CLI** — optional fallback for metadata (`sf org display` / describe / SOQL) when MCP is not connected. Enable it on the Salesforce workflow step.
+
+When this server is bound to loopback, Connections can write those variables into local `.env` (they are never stored in the database or returned to the browser). Otherwise set them in `.env` or your secret manager and restart.
 
 When Salesforce is not reachable or not configured, the platform says so explicitly — *"Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled."* — and keeps design and automation features working.
 
@@ -74,7 +84,7 @@ docs/              API reference and UI snapshots
 
 ## Supported Salesforce APIs
 
-REST, SOAP (partner/enterprise and Apex SOAP), Bulk API and Bulk API 2.0, Composite, Composite Graph, sObject Collections, GraphQL, Tooling, Metadata, Connect REST, Apex REST, Platform Events, Change Data Capture (via Pub/Sub API guidance), OAuth endpoints, and custom integration APIs configured per project. The API explorer has a template for each.
+REST, SOAP (partner/enterprise and Apex SOAP), Bulk API and Bulk API 2.0, Composite, Composite Graph, sObject Collections, GraphQL, Tooling, Metadata, Connect REST, Apex REST, Platform Events, Change Data Capture (via Pub/Sub API guidance), OAuth endpoints, Salesforce B2C Commerce Cloud (OCAPI Shop and SCAPI Shopper), and custom integration APIs configured per project. The API explorer has a template for each.
 
 ### Coverage by API family
 

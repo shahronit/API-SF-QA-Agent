@@ -48,9 +48,18 @@
     send: '<path d="M4 12 20 4l-6 16-3-7z"/>',
     chevronRight: '<path d="m9 6 6 6-6 6"/>',
     inbox: '<path d="M3 13h5l2 3h4l2-3h5"/><path d="M5 5h14l2 8v6H3v-6z"/>',
+    bookmark: '<path d="M6 4h12v16l-6-3-6 3z"/>',
+    zap: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+    sparkles: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6.2 6.2l2.5 2.5M15.3 15.3l2.5 2.5M6.2 17.8l2.5-2.5M15.3 8.7l2.5-2.5"/>',
+    history: '<path d="M4 12a8 8 0 1 0 3-6.3"/><path d="M4 5v5h5M12 8v5l3 2"/>',
+    circle: '<circle cx="12" cy="12" r="7"/>',
+    dot: '<circle cx="12" cy="12" r="5" fill="currentColor" stroke="none"/>',
   };
+  const SIZE = { 'icon-xs': 12, 'icon-sm': 14, 'icon-md': 16, 'icon-lg': 20, 'icon-xl': 24 };
   function icon(name, cls = '') {
-    return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || P.info}</svg>`;
+    const size = Object.entries(SIZE).find(([k]) => cls.includes(k));
+    const px = size ? size[1] : 16;
+    return `<svg class="icon ${cls}" width="${px}" height="${px}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || P.info}</svg>`;
   }
   window.QA = window.QA || { pages: {} };
   window.QA.icon = icon;

@@ -11,8 +11,10 @@
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Test scenarios' }]);
       const m = QA.state.meta;
-      view.innerHTML = String(h`${C.pageHead('Test scenarios', 'Scenarios group test cases by intent — functional, negative, boundary, security and integration — and trace back to their Jira story.',
-        h`<a class="btn primary" href="/stories" data-link>${ic('wand')} Generate from a story</a>`)}<div data-list></div>`);
+      view.innerHTML = String(h`${C.pageHead('Test scenarios', 'Groups of tests by intent (happy path, negative, boundary, security, integration), each tied to a Jira ticket.',
+        h`<a class="btn primary" href="/stories" data-link>${ic('wand')} Generate from a ticket</a>`)}
+        ${C.pageIntro({ what: 'A scenario is a folder of related tests for one ticket. Useful when you want coverage by intent rather than a flat test list.', next: 'Generate from a Jira ticket if this list is empty. Open Tests to edit individual cases.' })}
+        <div data-list></div>`);
       const list = C.listController(view.querySelector('[data-list]'), {
         sort: 's.id', dir: 'ASC', searchPlaceholder: 'Search id, title, story or object',
         filters: { type: ctx.query.type || '', priority: ctx.query.priority || '', storyKey: ctx.query.storyKey || '' },

@@ -108,4 +108,33 @@ function validateAgainst(contractId, cache, exchange) {
   return validateExchange(c, exchange);
 }
 
-module.exports = { parse, listOperations, validateExchange, validateAgainst, detectKind };
+function pathOf(endpoint) {
+  const raw = String(endpoint || '');
+  try { return new URL(raw, 'https://x').pathname; } catch { return raw.split('?')[0]; }
+}
+
+function attachToScenarios(project, scenarios) {
+  if (!project || !project.id) return 0;
+  let list = [];
+  try { list = repo.find('contracts', 'projectId = $p', { p: project.id }); } catch { return 0; }
+  if (!list.length) return 0;
+  let n = 0;
+  for (const s of scenarios || []) {
+    for (const tc of s.testCases || []) {
+      if (tc.contractRef && tc.contractRef.contractId) continue;
+      const urlPath = pathOf(tc.endpoint).replace(/\{\{[^}]+\}\}/g, 'x');
+      for (const c of list) {
+        if (!c.spec) continue;
+        const found = findOperation(c.spec, c.kind, tc.method || 'GET', urlPath);
+        if (!found) continue;
+        tc.contractRef = { contractId: c.id };
+        tc.tags = [...new Set([...(tc.tags || []), 'contract'])];
+        n++;
+        break;
+      }
+    }
+  }
+  return n;
+}
+
+module.exports = { parse, listOperations, validateExchange, validateAgainst, detectKind, findOperation, attachToScenarios };

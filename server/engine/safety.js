@@ -6,7 +6,7 @@
  */
 const WRITE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 // POST endpoints that do not modify org data.
-const READ_ONLY_POSTS = [/\/graphql$/i, /\/services\/oauth2\/(token|introspect|userinfo)/i];
+const READ_ONLY_POSTS = [/\/graphql$/i, /\/services\/oauth2\/(token|introspect|userinfo)/i, /\/oauth2\/(access_token|token)$/i, /\/product_search$/i, /\/product-search$/i];
 
 const PRODUCTION_WARNING = 'This operation will modify Salesforce production data.';
 
