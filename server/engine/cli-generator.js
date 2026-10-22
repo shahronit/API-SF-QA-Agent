@@ -6,7 +6,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const { generateSuite } = require('./generator');
+const { generateSuite, normalizeInputSource, INPUT_SOURCES } = require('./generator');
 const { normalizeSalesforcePath } = require('../connectors/salesforce-org');
 const { maskDeep } = require('../lib/mask');
 const { cursorFor } = require('../connectors/cursor-cli');
@@ -14,10 +14,24 @@ const { geminiFor } = require('../connectors/gemini-cli');
 const { config } = require('../config');
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
+const ASSERT_TYPES = new Set(['status', 'jsonpath', 'header', 'responseTime', 'sfError', 'schema', 'bodyContains']);
+const AUTH_MODES = new Set(['default', 'none', 'invalid', 'lowpriv']);
 const DOC_BODY_MAX = 8000;
 const PACK_DOC_MAX = 4000;
 const PACK_STORY_DESC = 4000;
 const PACK_STORY_AC = 3000;
+const PACK_OPENAPI_MAX = 4000;
+
+const CLI_JSON_CONTRACT = {
+  shape: '{ "scenarios": [{ "title", "type", "apiType", "object", "label", "testCases": [{ "title", "method", "endpoint", "assertions", "body", "query", "auth" }] }] }',
+  endpoint: 'Must start with / after Salesforce path normalisation.',
+  methods: [...METHODS],
+  assertionTypes: [...ASSERT_TYPES],
+  auth: [...AUTH_MODES],
+  labels: ['VERIFIED', 'ASSUMED', 'RECOMMENDED'],
+  secrets: 'Do not emit secrets, tokens, or credentials.',
+  objects: 'Unknown sObjects are dropped. Unknown __c body fields are labelled RECOMMENDED.',
+};
 
 function scriptGeneratorPref(project) {
   const v = ((project && project.integrationConfig) || {}).scriptGenerator || 'auto';
@@ -135,7 +149,7 @@ function isLikelySObject(name) {
 function normalizeAssertion(a) {
   if (!a || typeof a !== 'object') return null;
   const type = String(a.type || a.kind || '').trim();
-  if (!type) return null;
+  if (!ASSERT_TYPES.has(type)) return null;
   return {
     type,
     op: a.op || a.operator || 'eq',
@@ -158,13 +172,15 @@ function normalizeTestCase(tc, scenario, invented) {
   const object = tc.object || scenario.object || null;
   if (invented.objects.has(object)) label = label === 'VERIFIED' ? 'ASSUMED' : (label || 'ASSUMED');
   if (invented.fields.length) label = 'RECOMMENDED';
+  const authRaw = String(tc.auth || 'default').toLowerCase();
+  const auth = AUTH_MODES.has(authRaw) ? authRaw : 'default';
   return {
     title: String(tc.title || `${method} ${endpoint}`).slice(0, 200),
     description: tc.description || null,
     apiType: tc.apiType || scenario.apiType || 'REST',
     method,
     endpoint,
-    auth: tc.auth || 'default',
+    auth,
     headers: tc.headers && typeof tc.headers === 'object' ? tc.headers : {},
     query: tc.query && typeof tc.query === 'object' ? tc.query : {},
     body: tc.body === undefined ? null : tc.body,
@@ -267,17 +283,118 @@ function describeSnippets(engine) {
   return out;
 }
 
-function buildContextPack({ project, story, engine, docs }) {
+function openapiSummaries(project, extra) {
+  if (Array.isArray(extra) && extra.length) return capOpenapi(extra);
+  if (!project || !project.id) return [];
+  let list = [];
+  try { list = require('../db').repo.find('contracts', 'projectId = $p', { p: project.id }); } catch { return []; }
+  const { listOperations } = require('./contracts');
+  const ops = [];
+  for (const c of list) {
+    if (!c || !c.spec) continue;
+    const kind = c.kind || (c.spec.openapi ? 'openapi' : c.spec.swagger ? 'swagger' : 'jsonschema');
+    if (kind === 'jsonschema') continue;
+    try {
+      for (const op of listOperations(c.spec, kind)) {
+        ops.push({
+          method: op.method,
+          path: op.path,
+          operationId: op.id,
+          summary: String(op.summary || '').slice(0, 160),
+        });
+        if (ops.length >= 80) return capOpenapi(ops);
+      }
+    } catch { /* skip malformed contract */ }
+  }
+  return capOpenapi(ops);
+}
+
+function capOpenapi(ops) {
+  const out = (ops || []).slice(0, 80).map((op) => ({
+    method: op.method,
+    path: op.path,
+    operationId: op.operationId || op.id,
+    summary: String(op.summary || '').slice(0, 160),
+  }));
+  while (out.length && JSON.stringify(out).length > PACK_OPENAPI_MAX) out.pop();
+  return out;
+}
+
+function countLabels(scenarios) {
+  const counts = { VERIFIED: 0, ASSUMED: 0, RECOMMENDED: 0 };
+  for (const s of scenarios || []) {
+    for (const t of s.testCases || []) {
+      const l = String(t.label || 'ASSUMED').toUpperCase();
+      if (counts[l] !== undefined) counts[l]++;
+      else counts.ASSUMED++;
+    }
+  }
+  return counts;
+}
+
+function buildTraceability({ analysis, scenarios, source, cli = null, docs = [], openapi = [] }) {
+  const all = analysis.acceptance || [];
+  const acItems = all.filter((a) => a.source !== 'doc');
+  const docItems = all.filter((a) => a.source === 'doc');
+  const acLines = acItems.length || (all.length ? 0 : (analysis.acceptanceCriteria || []).length);
+  const mappedSet = new Set((analysis.acceptanceMapped || []).map((m) => m.ac || m.text));
+  const acMapped = acItems.filter((a) => mappedSet.has(a.text)).length;
+  const docRulesMapped = docItems.filter((a) => mappedSet.has(a.text)).length;
+  const unmapped = acItems.filter((a) => !mappedSet.has(a.text)).map((a) => a.text).slice(0, 10);
+  const acMappedPct = acLines ? Math.round((acMapped / acLines) * 1000) / 10 : null;
+  const raw = (cli && Number(cli.rawScenarios)) || 0;
+  const kept = (cli && Number(cli.keptScenarios)) || 0;
+  const dropped = (cli && cli.droppedObjects) || [];
+  const keepRate = raw ? Math.round((kept / raw) * 1000) / 10 : null;
+  const fallbackNotes = (analysis.notes || []).filter((n) => /falling back|did not return valid JSON|not installed|not logged/i.test(typeof n === 'string' ? n : (n.text || '')));
+  return {
+    generator: source || analysis.generator || 'engine',
+    fallback: source === 'engine' && fallbackNotes.length > 0,
+    fallbackNotes: fallbackNotes.map((n) => (typeof n === 'string' ? n : n.text)).slice(0, 4),
+    acLines,
+    acMapped,
+    acMappedPct,
+    acUnmapped: unmapped,
+    docRules: docItems.length,
+    docRulesMapped,
+    cli: {
+      rawScenarios: raw,
+      keptScenarios: kept,
+      keptTests: (cli && cli.keptTests) || 0,
+      droppedObjects: dropped,
+      keepRate,
+    },
+    labels: countLabels(scenarios),
+    docsUsed: (docs || []).map((d) => d.name).filter(Boolean).slice(0, 20),
+    openapiOps: (openapi || []).length,
+    inputSource: analysis.inputSource || 'jira+docs',
+  };
+}
+
+function sourceInstruction(inputSource) {
+  if (inputSource === 'docs') {
+    return 'Integration documents are the only context. Do not invent requirements from a Jira ticket. OpenAPI operations are optional endpoints — do not invent Salesforce objects from them.';
+  }
+  if (inputSource === 'jira') {
+    return 'Jira story is the only context. Do not use integration documents. OpenAPI operations are optional endpoints — do not invent Salesforce objects from them.';
+  }
+  return 'Jira story is the primary context. Integration docs are additional. OpenAPI operations are optional endpoints — do not invent Salesforce objects from them.';
+}
+
+function buildContextPack({ project, story, engine, docs, openapi, inputSource = 'jira+docs' }) {
+  const src = normalizeInputSource(inputSource) || engine.analysis.inputSource || 'jira+docs';
+  const openapiOps = src === 'jira' ? [] : openapiSummaries(project, openapi);
   const pack = {
     instruction: [
       'Propose Salesforce/HTTP API test scenarios as JSON only.',
-      'Shape: {"scenarios":[{"title","type","apiType","object","description","label","testCases":[{"title","method","endpoint","apiType","testType","object","assertions":[{"type","op","expected"}],"body","query"}]}]}',
+      `Shape: ${CLI_JSON_CONTRACT.shape}`,
+      `endpoint must start with /. auth is one of ${CLI_JSON_CONTRACT.auth.join('|')}. assertion type is one of ${CLI_JSON_CONTRACT.assertionTypes.join('|')}.`,
       'Use only Salesforce object and field names listed under describe. Do not invent object or field names.',
       'If you need a name that is not listed, omit that case (the built-in engine already covers executable defaults).',
-      'Jira story is the primary context. Integration docs are additional.',
+      sourceInstruction(src),
       'Do not include secrets, tokens, or credentials.',
     ].join(' '),
-    story: {
+    story: src === 'docs' ? { key: story.key, note: 'Link only. Do not use Jira text.' } : {
       key: story.key,
       summary: story.summary,
       description: String(story.description || '').slice(0, PACK_STORY_DESC),
@@ -286,7 +403,9 @@ function buildContextPack({ project, story, engine, docs }) {
     project: { id: project.id, name: project.name, environment: project.environment, apiVersion: project.apiVersion },
     describe: describeSnippets(engine),
     detected: { objects: engine.analysis.objects, operations: engine.analysis.operations, apiTypes: engine.analysis.apiTypes },
-    docs: (docs || []).map((d) => ({ name: d.name, body: String(d.body || '').slice(0, PACK_DOC_MAX) })),
+    docs: src === 'jira' ? [] : (docs || []).map((d) => ({ name: d.name, body: String(d.body || '').slice(0, PACK_DOC_MAX) })),
+    openapi: openapiOps,
+    inputSource: src,
   };
   return maskDeep(pack);
 }
@@ -295,10 +414,23 @@ function buildPrompt(pack) {
   return `You are a Salesforce API QA engineer. Reply with a single JSON object only (no markdown).\n${JSON.stringify(pack)}`;
 }
 
-async function generateProposedSuite({ project, story, sf, docs = [] }) {
-  const engine = await generateSuite({ project, story, sf });
+async function generateProposedSuite({ project, story, sf, docs = [], openapi = [], inputSource = 'jira+docs' }) {
+  const src = normalizeInputSource(inputSource) || 'jira+docs';
+  const useDocs = src === 'jira' ? [] : docs;
+  const engine = await generateSuite({ project, story, sf, docs: useDocs, inputSource: src });
   const notes = [];
   const order = pickCliOrder(project);
+  const finish = (source, scenarios, extraNotes = [], cli = null) => {
+    const analysis = {
+      ...engine.analysis,
+      generator: source,
+      notes: [...(engine.analysis.notes || []), ...notes, ...extraNotes],
+    };
+    const openapiOps = src === 'jira' ? [] : openapiSummaries(project, openapi);
+    analysis.inputSource = src;
+    analysis.traceability = buildTraceability({ analysis, scenarios, source, cli, docs: useDocs, openapi: openapiOps });
+    return { analysis, scenarios, source };
+  };
   for (const tool of order) {
     const adapter = tool === 'cursor' ? cursorFor(project) : geminiFor(project);
     const source = tool === 'cursor' ? 'cursor-cli' : 'gemini-cli';
@@ -314,37 +446,26 @@ async function generateProposedSuite({ project, story, sf, docs = [] }) {
       continue;
     }
     try {
-      const pack = buildContextPack({ project, story, engine, docs });
+      const pack = buildContextPack({ project, story, engine, docs: useDocs, openapi, inputSource: src });
       const raw = await adapter.generate(buildPrompt(pack));
       const parsed = unwrapCliJson(raw);
       if (!parsed) {
         notes.push({ label: 'ASSUMED', text: `${source} did not return valid JSON. Using the built-in engine.` });
         continue;
       }
+      const rawScenarios = Array.isArray(parsed.scenarios) ? parsed.scenarios.length
+        : Array.isArray(parsed.testCases) ? 1 : 0;
       const sanitized = sanitizeCliProposal(parsed, engine);
       const scenarios = mergeWithEngine(sanitized.scenarios, engine);
-      return {
-        analysis: {
-          ...engine.analysis,
-          generator: source,
-          notes: [...(engine.analysis.notes || []), ...notes, ...sanitized.notes],
-        },
-        scenarios,
-        source,
-      };
+      const keptTests = sanitized.scenarios.reduce((n, s) => n + (s.testCases || []).length, 0);
+      return finish(source, scenarios, sanitized.notes, {
+        rawScenarios, keptScenarios: sanitized.scenarios.length, keptTests, droppedObjects: sanitized.dropped,
+      });
     } catch (e) {
       notes.push({ label: 'ASSUMED', text: `${e.title || e.message} Falling back to the built-in engine.` });
     }
   }
-  return {
-    analysis: {
-      ...engine.analysis,
-      generator: 'engine',
-      notes: [...(engine.analysis.notes || []), ...notes],
-    },
-    scenarios: engine.scenarios,
-    source: 'engine',
-  };
+  return finish('engine', engine.scenarios);
 }
 
 async function analyzeRunWithCli(project, run, failures) {
@@ -377,5 +498,6 @@ async function analyzeRunWithCli(project, run, failures) {
 module.exports = {
   generateProposedSuite, pickCliOrder, scriptGeneratorPref, unwrapCliJson, sanitizeCliProposal,
   mergeWithEngine, buildContextPack, safeLocalPath, readLocalDocFile, looksLikeSecretText, looksLikeSecretPath,
-  analyzeRunWithCli,
+  analyzeRunWithCli, CLI_JSON_CONTRACT, openapiSummaries, buildTraceability, normalizeTestCase,
+  normalizeInputSource, INPUT_SOURCES,
 };

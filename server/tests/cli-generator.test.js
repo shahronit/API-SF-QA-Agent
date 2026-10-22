@@ -4,11 +4,15 @@ process.env.SEED_DEMO = 'false';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DemoSalesforce } = require('../connectors/demo-salesforce');
-const { cursorFor, detectCursorBin, parseWhoami } = require('../connectors/cursor-cli');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { cursorFor, detectCursorBin, parseWhoami, isCursorIdeShim } = require('../connectors/cursor-cli');
 const { geminiFor } = require('../connectors/gemini-cli');
 const {
   generateProposedSuite, pickCliOrder, unwrapCliJson, sanitizeCliProposal, mergeWithEngine,
-  looksLikeSecretPath, looksLikeSecretText, safeLocalPath,
+  looksLikeSecretPath, looksLikeSecretText, safeLocalPath, buildContextPack, normalizeTestCase,
+  CLI_JSON_CONTRACT, normalizeInputSource,
 } = require('../engine/cli-generator');
 
 const engineStub = {
@@ -26,6 +30,15 @@ const engineStub = {
     testCases: [{ title: 'Create Contact', method: 'POST', endpoint: '/services/data/v{{apiVersion}}/sobjects/Contact', assertions: [{ type: 'status', op: 'eq', expected: 201 }], object: 'Contact', testType: 'Functional' }],
   }],
 };
+
+test('normalizeInputSource maps Jira / docs / both', () => {
+  assert.equal(normalizeInputSource('jira'), 'jira');
+  assert.equal(normalizeInputSource('Jira tickets'), 'jira');
+  assert.equal(normalizeInputSource('integration doc'), 'docs');
+  assert.equal(normalizeInputSource('jira+docs'), 'jira+docs');
+  assert.equal(normalizeInputSource('both'), 'jira+docs');
+  assert.equal(normalizeInputSource('nope'), null);
+});
 
 test('unwrapCliJson reads fenced JSON and agent result wrappers', () => {
   const inner = { scenarios: [{ title: 'X', testCases: [{ title: 't', method: 'GET', endpoint: '/limits', assertions: [{ type: 'status', expected: 200 }] }] }] };
@@ -113,17 +126,57 @@ test('generateProposedSuite falls back to the engine when Cursor CLI is missing'
   assert.equal(r.source, 'engine');
   assert.ok(r.scenarios.length > 0);
   assert.ok(r.analysis.notes.some((n) => /not installed|built-in engine/i.test(n.text)));
+  assert.equal(r.analysis.traceability.generator, 'engine');
+  assert.equal(r.analysis.traceability.fallback, true);
 });
 
-test('detectCursorBin finds agent or cursor when present on this machine', () => {
-  const found = detectCursorBin('');
-  if (found) assert.match(found, /agent|cursor/);
+test('normalizeTestCase requires a / endpoint and known auth/assertion types', () => {
+  const invented = { objects: new Set(), fields: [] };
+  const ok = normalizeTestCase({ title: 't', method: 'GET', endpoint: '/limits', assertions: [{ type: 'status', expected: 200 }], auth: 'none' }, { label: 'ASSUMED' }, invented);
+  assert.equal(ok.auth, 'none');
+  assert.equal(normalizeTestCase({ method: 'GET', endpoint: 'limits' }, {}, invented), null);
+  const unknownAssert = normalizeTestCase({ method: 'GET', endpoint: '/limits', assertions: [{ type: 'regex' }] }, {}, invented);
+  assert.equal(unknownAssert.assertions[0].type, 'status');
+  const badAuth = normalizeTestCase({ method: 'GET', endpoint: '/limits', auth: 'admin', assertions: [{ type: 'status', expected: 200 }] }, {}, invented);
+  assert.equal(badAuth.auth, 'default');
+});
+
+test('buildContextPack includes capped OpenAPI operations and the JSON contract', () => {
+  const pack = buildContextPack({
+    project: { id: 'UT-CLI', name: 'UT', environment: 'QA', apiVersion: '62.0' },
+    story: { key: 'UT-1', summary: 'x', description: 'y', acceptanceCriteria: '- 201' },
+    engine: engineStub,
+    docs: [{ name: 'map.md', body: 'Contact.LastName' }],
+    openapi: [{ method: 'POST', path: '/v1/invoices', id: 'createInvoice', summary: 'Create invoice' }],
+  });
+  assert.equal(pack.openapi[0].method, 'POST');
+  assert.equal(pack.openapi[0].path, '/v1/invoices');
+  assert.match(pack.instruction, /auth is one of/);
+  assert.match(CLI_JSON_CONTRACT.shape, /scenarios/);
+});
+
+test('detectCursorBin prefers agent over the cursor IDE shim', () => {
+  const agent = detectCursorBin('agent');
+  const auto = detectCursorBin('');
+  if (agent) assert.equal(auto, agent);
+  else if (auto) assert.match(auto, /agent|cursor/);
+});
+
+test('isCursorIdeShim detects the installer cursor wrapper', () => {
+  const shim = path.join(os.tmpdir(), `cursor-shim-${process.pid}`);
+  fs.writeFileSync(shim, '#!/bin/sh\necho "Error: No Cursor IDE installation found. Use \'cursor agent\' or \'agent\' to run the agent."\n');
+  assert.equal(isCursorIdeShim(shim), true);
+  fs.unlinkSync(shim);
+  assert.equal(isCursorIdeShim('/no/such/cursor-cli'), false);
 });
 
 test('parseWhoami treats Cursor whoami JSON as logged in / not logged in', () => {
   assert.equal(parseWhoami('{"status":"authenticated","isAuthenticated":true}').loggedIn, true);
   assert.equal(parseWhoami('{"status":"unauthenticated","isAuthenticated":false}').loggedIn, false);
   assert.equal(parseWhoami('not json').loggedIn, false);
+  const real = parseWhoami('{"status":"authenticated","isAuthenticated":true,"userInfo":{"email":"qa@example.com"}}');
+  assert.equal(real.loggedIn, true);
+  assert.equal(real.account, 'qa@example.com');
 });
 
 test('Cursor and Gemini Connect fail clearly when the CLI is missing', () => {

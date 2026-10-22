@@ -1,0 +1,56 @@
+---
+description: Orchestrate Jira story + integration doc → in-app API tests. Call this app's APIs; keep approve-before-run; do not invent a parallel Postman world.
+alwaysApply: true
+---
+
+# Jira + doc API test agent
+
+This repo is the Salesforce API QA platform. When asked to generate or run API tests from a Jira story and an integration document, **drive this app** — do not author a separate Postman collection as the source of truth.
+
+## Topology
+
+1. **In-app engine** (`server/engine/generator.js` `generateSuite`, `runner.js`, `assertions.js`) is executable truth.
+2. **In-app Cursor CLI then Gemini CLI** (`cli-generator.js`) may add scenarios from the story + `context_docs`. Prefer Cursor if logged in.
+3. **Cursor IDE Agent** orchestrates config, docs, and HTTP calls to this server. Do not use a Gemini Cursor subagent as the runtime generator. This app rejects Gemini/Cursor API keys; login is CLI session only.
+4. **Human approval** of `/api/proposals/:id/approve` is required for story suites. Never auto-approve. Never auto-create Jira defects.
+
+## Inputs
+
+- Jira key (`PROJ-123`) via existing sync/`getIssue` — not invented tickets.
+- Integration doc via `POST /api/projects/:id/context-docs` (paste or local path). No remote URL fetch, Confluence, or Jira attachments in v1.
+- Optional OpenAPI via contracts / `endpoints/from-openapi`.
+
+## Output JSON (CLI / any generator)
+
+Must match `normalizeTestCase` in `server/engine/cli-generator.js`:
+
+```json
+{
+  "scenarios": [{
+    "title": "string",
+    "type": "Functional|Negative|Boundary|Security|Integration|Contract",
+    "apiType": "REST",
+    "object": "Account",
+    "label": "ASSUMED",
+    "testCases": [{
+      "title": "string",
+      "method": "GET|POST|PUT|PATCH|DELETE|HEAD",
+      "endpoint": "/services/data/vXX.X/sobjects/Account",
+      "auth": "default",
+      "assertions": [{ "type": "status", "op": "eq", "expected": 201 }],
+      "body": {},
+      "query": {}
+    }]
+  }]
+}
+```
+
+Do not invent Salesforce objects/fields absent from describe. No secrets. Labels: **VERIFIED** (live describe/org only), **ASSUMED** (heuristics/demo/CLI), **RECOMMENDED** (AI extras).
+
+## Guardrails
+
+- Production writes need `confirmProductionWrites`; DELETE needs a second confirm (`safety.js`).
+- Do not edit Postman-gap files (http-lab, auth-apply, cookie-jar, script-sandbox, environments, curl, grpc, ws-sessions, mock-server) unless the user asked for those features.
+- Pass/fail comes from the runner after approve, not from the model.
+
+If the user wants unattended generation, use sync-and-generate then stop for human review — do not set approve=true (that flag is a no-op and must stay a no-op until an explicit product change).

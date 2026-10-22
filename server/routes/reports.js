@@ -8,15 +8,19 @@ const { config } = require('../config');
 const reports = require('../engine/reports');
 const postman = require('../engine/postman');
 const runner = require('../engine/runner');
-const { salesforceFor, connectorFor } = require('../connectors');
+const { salesforceFor, connectorFor, postmanFor } = require('../connectors');
 const { generateSuite } = require('../engine/generator');
 const { proposeSuite } = require('./stories');
 const { summarise } = require('../engine/analyzer');
 const { classifyStory } = require('../engine/classifier');
 const { pickObject, buildAdHocTest } = require('../engine/adhoc');
 const { prioritise } = require('../engine/priority');
+const { compareRuns, flakyTests } = require('../engine/run-compare');
 const { analyzeRunWithCli } = require('../engine/cli-generator');
 const { projectFrom, getProject } = require('./util');
+const { projectView, validateProject } = require('./core');
+const { normalizeCollection, detectHints, matchProject, projectPayload } = require('../engine/collection-import');
+const { parseEnvDoc, applyEnvironmentToProject } = require('../engine/env-apply');
 const { selectTests, withDependencies } = require('./runs');
 const { checkOperation, isProduction } = require('../engine/safety');
 
@@ -141,25 +145,127 @@ route('GET', '/api/postman/environment', (ctx) => {
   return raw(JSON.stringify(postman.exportEnvironment(p), null, 2), { 'Content-Type': MIME.json, 'Content-Disposition': `attachment; filename="${p.environment.toLowerCase()}.postman_environment.json"` });
 });
 
-route('POST', '/api/postman/import', (ctx) => {
-  const p = projectFrom(ctx);
-  let col = ctx.body.collection;
-  if (typeof col === 'string') { try { col = JSON.parse(col); } catch (e) { throw new HttpError(400, `Collection is not valid JSON: ${e.message}`); } }
-  let drafts;
-  try { drafts = postman.importCollection(col); } catch (e) { throw new HttpError(400, e.message, { action: 'Export the collection from Postman as Collection v2.1.' }); }
-  if (ctx.body.preview) return { count: drafts.length, drafts: drafts.slice(0, 200) };
-  const { nextId } = require('../db');
-  const { prioritise } = require('../engine/priority');
-  let seq = (get('SELECT MAX(seq) AS m FROM test_cases WHERE projectId = $p', { p: p.id }).m || 0) + 100;
-  const ids = [];
-  for (const d of drafts) {
-    const id = nextId('TC', 5);
-    const pr = prioritise(d, { project: p });
-    repo.insert('test_cases', { id, projectId: p.id, seq: seq += 10, ...d, storyKey: ctx.body.storyKey || null, priority: pr.priority, priorityReason: pr, status: 'ready', tags: ['imported'], extract: [], automated: 1, createdAt: now(), updatedAt: now() });
-    ids.push(id);
+function createProjectFromHints(hints, user) {
+  const b = projectPayload(hints);
+  validateProject(b);
+  const p = { id: nextId('PRJ', 3), createdAt: now(), updatedAt: now(), status: 'active', mode: b.mode || 'live' };
+  for (const f of ['name', 'description', 'sfOrg', 'environment', 'instanceUrl', 'apiVersion', 'mode', 'credentialRef', 'testDataConfig', 'integrationConfig', 'businessConfig']) {
+    if (b[f] !== undefined) p[f] = b[f];
   }
-  audit('automation', 'postman.imported', { user: ctx.user, projectId: p.id, detail: { count: ids.length, collection: col.info && col.info.name } });
-  return { imported: ids.length, ids };
+  p.testDataConfig = p.testDataConfig || { autoCleanup: true, variables: {} };
+  p.businessConfig = p.businessConfig || { slaMs: 2000 };
+  repo.insert('projects', p);
+  audit('project', 'project.created', { user, projectId: p.id, detail: { name: p.name, environment: p.environment, from: 'postman-import' } });
+  return repo.get('projects', p.id);
+}
+
+route('POST', '/api/postman/import', async (ctx) => {
+  let col = ctx.body && ctx.body.collection;
+  let env = ctx.body && ctx.body.environment;
+  if (typeof col === 'string') { try { col = JSON.parse(col); } catch (e) { throw new HttpError(400, `Collection is not valid JSON: ${e.message}`); } }
+  if (typeof env === 'string') { try { env = JSON.parse(env); } catch (e) { throw new HttpError(400, `Environment is not valid JSON: ${e.message}`); } }
+  let envDoc;
+  if (env) {
+    try { envDoc = parseEnvDoc(env); } catch (e) {
+      throw new HttpError(400, e.message, { action: 'Export a Postman environment JSON ({ name, values }). Secrets are skipped.' });
+    }
+  }
+  let normalized;
+  let drafts;
+  try {
+    normalized = normalizeCollection(col);
+    drafts = postman.importCollection(normalized);
+  } catch (e) {
+    throw new HttpError(400, e.message, { action: 'Export the collection from Postman (v1, v2, or v2.1 JSON). An environment file is optional.' });
+  }
+  const hints = detectHints(normalized, drafts, env);
+  const projects = repo.find('projects', "status != 'archived'", {}, 'ORDER BY name');
+  const matched = matchProject(hints, projects);
+  const hinted = ctx.body && (ctx.body.projectId || ctx.query.projectId);
+  const forceCurrent = Boolean(ctx.body && ctx.body.useCurrent);
+  let p = null;
+  let created = false;
+  let reused = false;
+  if (forceCurrent && hinted) {
+    p = getProject(hinted);
+    reused = true;
+  } else if (matched.project) {
+    p = matched.project;
+    reused = true;
+  } else if (hinted && !ctx.body.auto) {
+    p = getProject(hinted);
+    reused = true;
+  }
+  if (ctx.body.preview) {
+    return {
+      count: drafts.length,
+      drafts: drafts.slice(0, 200),
+      hints: {
+        name: hints.name, environment: hints.environment, apiVersion: hints.apiVersion,
+        instanceUrl: hints.instanceUrl, httpBaseUrl: hints.httpBaseUrl, sfOrg: hints.sfOrg,
+        orgId: hints.orgId, kind: hints.kind, orgKind: hints.orgKind, needsBearer: hints.needsBearer,
+      },
+      match: p ? { id: p.id, name: p.name, environment: p.environment, score: matched.score } : null,
+      action: p ? 'reuse' : 'create',
+    };
+  }
+  if (!p) {
+    p = createProjectFromHints(hints, ctx.user);
+    created = true;
+  }
+  const pm = postmanFor(p);
+  const attached = await pm.attachExisting({
+    collection: normalized, importTests: ctx.body.importTests !== false, storyKey: ctx.body.storyKey,
+    variables: hints.variables, hints,
+  });
+  let envApply = null;
+  if (envDoc) {
+    const ip = String((ctx.req.socket && ctx.req.socket.remoteAddress) || '');
+    const loopback = (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1')
+      && (config.host === '127.0.0.1' || config.host === 'localhost');
+    envApply = applyEnvironmentToProject(repo.get('projects', p.id), envDoc, {
+      user: ctx.user, fillEmptyOnly: ctx.body.overwrite !== true, loopback,
+    });
+  }
+  audit('automation', 'postman.imported', { user: ctx.user, projectId: p.id, detail: { count: attached.imported, collection: normalized.info && normalized.info.name, collectionId: attached.collectionId, created, envApplied: Boolean(envApply) } });
+  const view = projectView(repo.get('projects', p.id));
+  const { httpCredentials } = require('../config');
+  const httpCreds = httpCredentials(((p.integrationConfig || {}).http || {}).credentialRef || p.credentialRef);
+  const missingToken = Boolean(hints.needsBearer || attached.needsBearer) && !(httpCreds && httpCreds.token);
+  const setupHref = (attached.missingHttp || missingToken) ? `/projects/${p.id}?tab=connection&focus=http` : null;
+  return {
+    imported: attached.imported,
+    skipped: attached.skipped,
+    ids: attached.testIds,
+    collectionId: attached.collectionId,
+    reuseExisting: true,
+    created,
+    reused,
+    project: view,
+    httpBaseUrl: attached.httpBaseUrl || hints.httpBaseUrl || null,
+    needsBearer: Boolean(attached.needsBearer || hints.needsBearer),
+    missingHttp: Boolean(attached.missingHttp),
+    missingToken,
+    href: setupHref,
+    hints: {
+      name: hints.name, environment: hints.environment, apiVersion: hints.apiVersion,
+      instanceUrl: hints.instanceUrl, httpBaseUrl: hints.httpBaseUrl, sfOrg: hints.sfOrg,
+      orgId: hints.orgId, kind: hints.kind, needsBearer: hints.needsBearer,
+    },
+    environment: envApply ? {
+      name: envApply.environment && envApply.environment.name,
+      applied: envApply.applied,
+      credentials: envApply.credentials,
+      secretsSkipped: [],
+      skippedKeys: [],
+    } : null,
+    notice: [
+      created
+        ? `Created project “${view.name}” from the collection and imported ${attached.imported} request(s).`
+        : `Using existing project “${view.name}”. ${attached.notice}`,
+      envApply && envApply.applied.length ? `Environment: ${envApply.applied.join('; ')}.` : '',
+    ].filter(Boolean).join(' '),
+  };
 });
 
 route('POST', '/api/postman/newman', async (ctx) => {
@@ -211,26 +317,49 @@ route('POST', '/api/agent/command', async (ctx) => {
   const reply = (mode, message, extra = {}) => { audit('agent', `command.${mode.toLowerCase()}`, { user: ctx.user, projectId: p.id, detail: { text: text.slice(0, 200) } }); return { mode, modeDescription: MODE_HELP[mode], projectId: p.id, message, ...extra }; };
 
   if (/\b(help|what can you do|commands|what are you)\b/.test(lower)) {
-    return reply('Discover', AGENT_NOT, { modes: MODE_HELP, examples: ['Analyze Jira story DEMO-101 and generate Salesforce API test cases.', 'GET https://httpbin.org/status/200', 'Run frontend HTTP tests.', 'Discover all APIs related to Contact.', 'Generate negative tests for the Account API.', 'Run the Account API regression suite in QA.', 'Validate the API response against Salesforce.', 'Analyze failed tests from the latest execution.', 'Create Jira defects for confirmed failures.', 'Show me APIs with failure rate above 10%.', 'Generate a Postman collection for this API.', 'Generate Newman automation.', 'Run only P0 and P1 tests.', 'Generate the QA execution report.'] });
+    return reply('Discover', AGENT_NOT, { modes: MODE_HELP, examples: ['Analyze Jira story DEMO-101 and generate Salesforce API test cases.', 'Plan DEMO-101 from docs', 'GET https://httpbin.org/status/200', 'Run frontend HTTP tests.', 'Discover all APIs related to Contact.', 'Generate negative tests for the Account API.', 'Run the Account API regression suite in QA.', 'Validate the API response against Salesforce.', 'Analyze failed tests from the latest execution.', 'Create Jira defects for confirmed failures.', 'Show me APIs with failure rate above 10%.', 'Generate a Postman collection for this API.', 'Generate Newman automation.', 'Run only P0 and P1 tests.', 'Compare the latest run with the previous run.', 'Show flaky tests.', 'Generate the QA execution report.'] });
   }
-  if (storyKey && /(analy[sz]e|generate)/.test(lower)) {
+  if (storyKey && /(analy[sz]e|generate|plan)/.test(lower)) {
     const story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: storyKey });
     if (!story) throw new HttpError(404, `Story ${storyKey} is not in ${p.name}. Sync stories from Jira first.`, { action: 'Open Jira stories and click "Sync from Jira".' });
     const cls = classifyStory(story);
     if (!cls.needsApiTesting && cls.confidence === 'high' && !/\b(anyway|force|still)\b/.test(lower)) {
       return reply('Discover', `${storyKey} does not look like it needs API testing: ${cls.reasons.join(' ')} Say "Analyze ${storyKey} anyway" if you want scenarios proposed regardless.`, { data: { classification: cls }, examples: [`Analyze ${storyKey} anyway`] });
     }
-    const proposal = await proposeSuite(p, story, ctx.user);
+    const fromDocs = /from (the )?docs|plan[- ]from[- ]docs/.test(lower);
+    const fromJiraOnly = /from (the )?jira|jira tickets? only|ticket only/.test(lower);
+    const inputSource = fromDocs && !fromJiraOnly && !/jira/.test(lower) ? 'docs' : fromJiraOnly ? 'jira' : fromDocs ? 'jira+docs' : 'jira';
+    const docIds = inputSource === 'jira' ? [] : (fromDocs || inputSource === 'jira+docs' ? repo.find('context_docs', 'projectId = $p', { p: p.id }).map((d) => d.id) : ctx.body.docIds);
+    const proposal = await proposeSuite(p, story, ctx.user, { docIds, inputSource });
     const analysis = proposal.analysis || {};
     const scenarios = proposal.scenarios || [];
     const n = scenarios.reduce((s, x) => s + x.testCases.length, 0);
+    const tr = analysis.traceability || {};
     if (n === 0) {
       const why = (analysis.objects || []).length ? `Objects found (${analysis.objects.join(', ')}) but no testable operations or API types were detected.` : 'No Salesforce object or API type could be identified in the story.';
       return reply('Generate', `Analysed ${storyKey} but could not propose any test cases. ${why} ${(analysis.notes || []).map((x) => x.text).join(' ')} Name the object and the operation (for example "create a Contact via REST") in the story or ask: "Generate negative tests for the Account API".`.replace(/\s+/g, ' ').trim(), { data: { classification: cls, gaps: analysis.gaps } });
     }
     const clsNote = cls.needsApiTesting ? '' : ' Note: this ticket may not need API testing — review carefully before approving.';
-    const via = analysis.generator && analysis.generator !== 'engine' ? ` via ${analysis.generator}` : '';
-    return reply('Generate', `Analysed ${storyKey}: ${(analysis.objects || []).join(', ') || 'no objects'} · operations ${(analysis.operations || []).join(', ') || 'none detected'}. Proposed ${scenarios.length} scenarios / ${n} test cases (metadata ${analysis.metadataLabel}${via}).${clsNote} Uses Cursor CLI / Gemini CLI if connected, with this Jira ticket (and project integration docs) as context. Review and approve before anything is saved or sent to Jira.`, { navigate: `/stories/${storyKey}?proposal=${proposal.id}`, proposalId: proposal.id, data: { classification: cls } });
+    const via = tr.generator && tr.generator !== 'engine' ? ` via ${tr.generator}` : (tr.fallback ? ' via built-in engine (CLI fallback)' : '');
+    const metrics = tr.acMappedPct != null ? ` AC mapped ${tr.acMappedPct}%.` : '';
+    const usedDocs = (analysis.docsUsed || []).map((d) => d.name).filter(Boolean);
+    const context = usedDocs.length
+      ? `${inputSource === 'docs' ? 'Context: integration docs only' : 'Context: this Jira ticket plus'} ${usedDocs.length} doc(s) (${usedDocs.slice(0, 3).join(', ')}).`
+      : `Context: this Jira ticket only${repo.find('context_docs', 'projectId = $p', { p: p.id }).length ? ` — say "Plan ${storyKey} from docs" to include the project's integration docs` : ''}.`;
+    return reply('Generate', `Analysed ${storyKey}: ${(analysis.objects || []).join(', ') || 'no objects'} · operations ${(analysis.operations || []).join(', ') || 'none detected'}. Proposed ${scenarios.length} scenarios / ${n} test cases (metadata ${analysis.metadataLabel}${via}).${metrics}${clsNote} ${context} Review and approve before anything is saved or sent to Jira.`, { navigate: `/stories/${storyKey}?proposal=${proposal.id}`, proposalId: proposal.id, data: { classification: cls, traceability: tr } });
+  }
+  if (/\bflaky\b|\bunstable\b/.test(lower)) {
+    const items = flakyTests(p.id, { window: 5 });
+    return reply('Analyze', items.length
+      ? `${items.length} test(s) flipped between pass and fail across the last 5 runs: ${items.slice(0, 5).map((x) => `${x.testCaseId} (${x.history.join('→')})`).join(', ')}. Treat their failures as unconfirmed until they fail consistently.`
+      : 'No flaky tests: no test flipped between pass and fail more than once across the last 5 runs.', { data: { flaky: items } });
+  }
+  if (/\b(compare|diff|regressed|what changed|since last)\b/.test(lower)) {
+    if (!lastRun) return reply('Analyze', 'No completed execution yet.');
+    const runIds = text.match(/\bEX-\d{8}-[A-F0-9]{6}\b/g) || [];
+    const cmp = compareRuns(runIds[0] || lastRun.id, runIds[1] || 'previous');
+    if (!cmp) return reply('Analyze', `Execution ${runIds[0]} not found.`);
+    return reply('Analyze', `${cmp.message}${cmp.newlyFailing.length ? ` Newly failing: ${cmp.newlyFailing.slice(0, 5).map((x) => x.testCaseId).join(', ')}.` : ''}${cmp.fixed.length ? ` Fixed: ${cmp.fixed.slice(0, 5).map((x) => x.testCaseId).join(', ')}.` : ''}`, { navigate: `/execution/${cmp.run.id}?tab=analysis`, data: cmp });
   }
   if (/\bdiscover\b/.test(lower)) {
     const sf = salesforceFor(p);

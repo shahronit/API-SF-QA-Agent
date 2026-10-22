@@ -53,6 +53,8 @@ route('GET', '/api/projects/:id/postman/collections', async (ctx) => {
     workspace: pm.settings.workspace || (p.mode === 'demo' ? 'Demo workspace' : null),
     environment: p.environment,
     source: pm.client.available ? 'mcp' : (p.mode === 'demo' ? 'demo' : 'local'),
+    linkedCollectionId: pm.settings.collectionId || p.postmanCollection || null,
+    reuseExisting: pm.settings.reuseExisting === true,
     items: items.map(({ _raw, ...rest }) => rest),
   };
 });
@@ -94,14 +96,19 @@ route('POST', '/api/projects/:id/postman/analyze', async (ctx) => {
     project: p.name, org: p.sfOrg, environment: p.environment,
     jiraProject: p.jiraProjectKey, story: b.storyKey, api: b.api, endpoint: b.endpoint,
   });
-  const best = discovered.find((c) => c.score > 0) || discovered[0];
+  const linkedId = pm.settings.collectionId || p.postmanCollection;
+  const best = (linkedId && discovered.find((c) => c.uid === linkedId))
+    || discovered.find((c) => c.score > 0)
+    || discovered[0];
   if (!best) {
     return {
       action: 'create',
-      reason: 'No suitable Postman collection was found in the workspace. A new collection can be created after approval.',
+      reason: 'No suitable Postman collection was found in the workspace. Use an existing collection from a file, or create a new one after approval.',
       folders: diffEngine.suggestedFolders(tests),
       tests: tests.length,
       discovered: [],
+      linkedCollectionId: linkedId || null,
+      reuseExisting: pm.settings.reuseExisting === true,
     };
   }
   const raw = best._raw;
@@ -110,10 +117,12 @@ route('POST', '/api/projects/:id/postman/analyze', async (ctx) => {
   const needsApproval = comparison.missing.length + comparison.changed.length > 0;
   return {
     action: needsApproval ? 'update' : 'reuse',
-    collection: { id: stored.id, uid: raw.uid, name: raw.name, source: raw.source, workspace: stored.workspace },
+    collection: { id: stored.id, uid: raw.uid, name: raw.name, source: raw.source, workspace: stored.workspace, linked: Boolean(linkedId && raw.uid === linkedId) },
     diff: comparison,
     tests: tests.length,
-    discovered: discovered.slice(0, 8).map(({ _raw, ...rest }) => rest),
+    linkedCollectionId: linkedId || null,
+    reuseExisting: pm.settings.reuseExisting === true,
+    discovered: discovered.slice(0, 12).map(({ _raw, ...rest }) => rest),
   };
 });
 
@@ -164,6 +173,25 @@ route('POST', '/api/projects/:id/postman/proposals/:pid/reject', (ctx) => {
   repo.update('collection_proposals', rec.id, { status: 'rejected', decidedAt: now(), decision: { rejectedBy: ctx.user, reason: (ctx.body && ctx.body.reason) || null } });
   workflow.touch(p.id, 'postman', 'in_progress', { proposalId: rec.id });
   return { rejected: true };
+});
+
+route('POST', '/api/projects/:id/postman/attach', async (ctx) => {
+  const p = getProject(ctx.params.id);
+  const b = ctx.body || {};
+  const pm = postmanFor(p);
+  try {
+    const result = await pm.attachExisting({
+      uid: b.uid || b.collectionId,
+      collection: b.collection,
+      importTests: b.importTests !== false,
+      storyKey: b.storyKey,
+    });
+    workflow.touch(p.id, 'postman', 'completed', { collectionId: result.collectionId, reused: true, imported: result.imported });
+    audit('postman', 'collection.attached', { user: ctx.user, projectId: p.id, detail: { uid: result.collectionId, imported: result.imported } });
+    return result;
+  } catch (e) {
+    throw new HttpError(400, (e.explanation && e.explanation.title) || e.message, e.explanation || { action: 'Select a collection from Discover or import a Collection v2.1 file.' });
+  }
 });
 
 route('POST', '/api/projects/:id/postman/create', async (ctx) => {

@@ -9,6 +9,7 @@ const { DemoJira } = require('./demo-jira');
 const { CommerceCloudConnector } = require('./commerce-cloud');
 const { DemoCommerce } = require('./demo-commerce');
 const { postmanFor } = require('./postman');
+const { playwrightFor } = require('./playwright');
 const { httpFor } = require('./http');
 const { cursorFor } = require('./cursor-cli');
 const { geminiFor } = require('./gemini-cli');
@@ -27,7 +28,9 @@ function jiraFor(project) {
 }
 
 function commerceEnabled(project) {
-  const c = (project.integrationConfig && project.integrationConfig.commerce) || {};
+  const ic = (project && project.integrationConfig) || {};
+  if (ic.orgKind && String(ic.orgKind).startsWith('experience')) return false;
+  const c = ic.commerce || {};
   if (c.enabled === false) return false;
   if (c.enabled === true) return true;
   return Boolean(c.host || c.shortCode || c.orgId || c.siteId);
@@ -64,7 +67,9 @@ function isCommerceRequest(req = {}) {
   const p = String(req.path || req.endpoint || '');
   return /^(OCAPI|SCAPI|Commerce Cloud)$/i.test(t)
     || /\/dw\/(shop|data)\//.test(p)
-    || /shopper-(products|search|baskets|auth)/.test(p)
+    || /shopper-(products|search|baskets|auth|orders|customers)/.test(p)
+    || /\/shopper\/auth\//.test(p)
+    || /\/organizations\/[^/]+\/oauth2\/token/.test(p)
     || /commercecloud\.salesforce\.com/.test(p)
     || /demandware\.(net|com)/.test(p)
     || /\/dw\/oauth2\//.test(p);
@@ -102,6 +107,6 @@ function metadataLabel(project) {
 
 module.exports = {
   salesforceFor, jiraFor, commerceFor, connectorFor, isCommerceRequest, isSalesforceRequest, isHttpRequest, commerceEnabled,
-  postmanFor, httpFor, cursorFor, geminiFor, metadataLabel, ConnectorError, mcpSettings,
+  postmanFor, playwrightFor, httpFor, cursorFor, geminiFor, metadataLabel, ConnectorError, mcpSettings,
   classifyLoginUrl, loginPlan,
 };

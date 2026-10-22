@@ -30,6 +30,16 @@ async function waitForServer() {
   }
   throw new Error('Server did not start within 120 s');
 }
+function seedTempDb() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'server', 'seed.js'), '--reset'], {
+      env: { ...process.env, QA_DB_FILE: DB },
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error('seed failed with code ' + code))));
+  });
+}
+
 const get = async (u) => { const r = await fetch(BASE + u); if (!r.ok) return undefined; return r.json(); };
 
 async function capture(projectId) {
@@ -72,8 +82,9 @@ function inline(snap, route) {
 
 async function main() {
   const routes = process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT_ROUTES;
-  const env = { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', QA_DB_FILE: DB, SEED_DEMO: 'true' };
-  for (const k of Object.keys(env)) if (/^(SF_|JIRA_|ANTHROPIC_)/.test(k)) delete env[k]; // snapshots always use demo data
+  if (!KEEP_DB) await seedTempDb();
+  const env = { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', QA_DB_FILE: DB, SEED_DEMO: 'false' };
+  for (const k of Object.keys(env)) if (/^(SF_|JIRA_|ANTHROPIC_)/.test(k)) delete env[k]; // snapshots always use fixture data
   const srv = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'server', 'index.js')], { env, stdio: ['ignore', 'pipe', 'inherit'] });
   try {
     await waitForServer();

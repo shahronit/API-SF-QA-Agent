@@ -3,7 +3,9 @@
  * Demo dataset: projects, Jira stories, generated + approved suites, real
  * executions against the demo org simulator, 2 weeks of execution history,
  * defects, test data, an OpenAPI contract and saved requests.
- * Run directly with `npm run seed` (resets the database).
+ * Test/fixture helper only. The live server never auto-seeds.
+ * Run against a temp DB: `QA_DB_FILE=/tmp/qa-fixture.db npm run seed`.
+ * Refuses to write the live database unless FORCE_SEED=true.
  */
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -242,8 +244,8 @@ function insertProjects() {
     { ...base, id: 'PRJ-003', name: 'Acme Production Smoke', description: 'Read-only post-release smoke checks.', sfOrg: 'acme', environment: 'Production', instanceUrl: 'https://acme.my.salesforce.com', mode: 'demo', credentialRef: 'ACME_PROD', jiraProjectKey: 'PRD', jiraUrl: 'https://demo-jira.local',
       testDataConfig: { autoCleanup: false, variables: {} }, integrationConfig: { endpoints: [] }, notificationConfig: { onRunComplete: 'email', recipients: ['release@acme.example.com'] },
       businessConfig: { slaMs: 2000, criticalObjects: ['Account'] } },
-    { ...base, id: 'PRJ-004', name: 'Globex Commerce', description: 'B2B Commerce order APIs — awaiting connected-app credentials.', sfOrg: 'globex--sit', environment: 'SIT', instanceUrl: 'https://globex--sit.sandbox.my.salesforce.com', mode: 'live', credentialRef: 'GLOBEX_SIT', jiraProjectKey: 'GLX', jiraUrl: 'https://globex.atlassian.net', jiraCredentialRef: 'GLOBEX',
-      testDataConfig: { autoCleanup: true, variables: {} }, integrationConfig: { endpoints: [] }, notificationConfig: {}, businessConfig: { slaMs: 2000 } },
+    { ...base, id: 'PRJ-004', name: 'Globex Commerce', description: 'Experience Cloud B2B order APIs — awaiting connected-app credentials.', sfOrg: 'globex--sit', environment: 'SIT', instanceUrl: 'https://globex--sit.sandbox.my.salesforce.com', mode: 'live', credentialRef: 'GLOBEX_SIT', jiraProjectKey: 'GLX', jiraUrl: 'https://globex.atlassian.net', jiraCredentialRef: 'GLOBEX',
+      testDataConfig: { autoCleanup: true, variables: {} }, integrationConfig: { orgKind: 'experience-b2b', salesforceDetection: { connected: false, loginKind: 'core', types: ['Salesforce Core', 'Experience Cloud B2B'], orgKind: 'experience-b2b' }, experience: { enabled: true, channel: 'b2b', sites: [], stores: [] }, endpoints: [] }, notificationConfig: {}, businessConfig: { slaMs: 2000 } },
     { ...base, id: 'PRJ-005', name: 'Northwind Retail — Order Management', description: 'Wholesale distributor onboarding and order-status platform events, in active development.', sfOrg: 'northwind--dev', environment: 'Development', instanceUrl: 'https://northwind--dev.sandbox.my.salesforce.com', mode: 'demo', credentialRef: 'NORTHWIND_DEV', jiraProjectKey: 'NWR', jiraUrl: 'https://demo-jira.local',
       testDataConfig: { autoCleanup: true, variables: {} },
       integrationConfig: { middleware: 'Platform Events (native)', externalSystems: ['Warehouse management system', 'Carrier booking service'], endpoints: [] },
@@ -251,7 +253,7 @@ function insertProjects() {
       businessConfig: { slaMs: 2000, criticalObjects: ['Account'], highTrafficObjects: [] } },
     { ...base, id: 'PRJ-006', name: 'Globex B2C Commerce Cloud', description: 'B2C storefront APIs — OCAPI Shop and SCAPI Shopper (products, search, baskets) against a demo Commerce Cloud simulator.', sfOrg: 'globex-cc', environment: 'QA', instanceUrl: 'https://globex--qa.sandbox.my.salesforce.com', mode: 'demo', credentialRef: 'GLOBEX_CC', jiraProjectKey: 'GLX', jiraUrl: 'https://demo-jira.local',
       testDataConfig: { autoCleanup: true, variables: { siteId: 'RefArch', orgId: 'f_ecom_zzte_001' } },
-      integrationConfig: { commerce: { enabled: true, host: 'demo-commerce.example.com', siteId: 'RefArch', orgId: 'f_ecom_zzte_001', shortCode: 'demo', ocapiVersion: 'v24_5', sampleProductId: 'apple-iphone-15', credentialRef: 'GLOBEX_CC' }, endpoints: [] },
+      integrationConfig: { orgKind: 'sfcc-b2c', salesforceDetection: { connected: true, loginKind: 'sfcc', types: ['SFCC B2C'], orgKind: 'sfcc-b2c', host: 'demo-commerce.example.com' }, commerce: { enabled: true, channel: 'b2c', host: 'demo-commerce.example.com', siteId: 'RefArch', orgId: 'f_ecom_zzte_001', shortCode: 'demo', ocapiVersion: 'v24_5', sampleProductId: 'apple-iphone-15', credentialRef: 'GLOBEX_CC' }, endpoints: [] },
       notificationConfig: { onRunComplete: 'none' },
       businessConfig: { slaMs: 2000, criticalObjects: [] } },
   ];
@@ -521,6 +523,10 @@ async function seed({ log = console.log, reset = false } = {}) {
 }
 
 if (require.main === module) {
+  if (!process.env.QA_DB_FILE && process.env.FORCE_SEED !== 'true') {
+    console.error('Refusing to seed the live database (that would replace real projects with demo orgs). Set QA_DB_FILE to a temp path, or FORCE_SEED=true to override.');
+    process.exit(1);
+  }
   const reset = process.argv.includes('--reset');
   seed({ reset }).then(() => { console.log(`Seeded ${DB_FILE}`); process.exit(0); }).catch((e) => { console.error(e); process.exit(1); });
 }

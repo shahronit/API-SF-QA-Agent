@@ -36,10 +36,11 @@ function commerceScenarios(b, analysis) {
     analysis.gaps.push({ label: 'RECOMMENDED', text: 'Commerce Cloud is connected but siteId/orgId are not set. Generated paths use {{ccSiteId}} / {{ccOrgId}} — set them on Connections before treating results as VERIFIED.' });
   }
   if (!demo && !c.host && !(c.shortCode && c.orgId)) {
-    analysis.gaps.push({ label: 'RECOMMENDED', text: 'B2C / SFCC testers need a storefront host (OCAPI) or shortCode+orgId (SCAPI), plus SFCC_<PREFIX>_CLIENT_ID / CLIENT_SECRET in .env. Browser login alone does not issue a SLAS token.' });
+    analysis.gaps.push({ label: 'RECOMMENDED', text: 'SFCC testers need a storefront host (OCAPI) or shortCode+orgId (SCAPI), plus SFCC_<PREFIX>_CLIENT_ID / CLIENT_SECRET in .env. Browser login alone does not issue a SLAS token. SFCC B2B and SFCC B2C are separate projects.' });
   }
 
-  const ocapi = b.scenario('Commerce Cloud OCAPI — catalog search then product and basket', 'Functional', 'OCAPI', 'Product', 'Shop API: search the live catalog, retrieve the first hit, optionally add it to a guest basket. Auth is the SLAS/OCAPI client.');
+  const channel = (c.channel || ((project.integrationConfig || {}).orgKind === 'sfcc-b2b' ? 'b2b' : 'b2c')).toUpperCase();
+  const ocapi = b.scenario(`SFCC ${channel} OCAPI — catalog search then product and basket`, 'Functional', 'OCAPI', 'Product', 'Shop API: search the live catalog, retrieve the first hit, optionally add it to a guest basket. Auth is the SLAS/OCAPI client. SFCC B2B and SFCC B2C are separate orgs.');
   ocapi.label = label;
   const oc = { apiType: 'OCAPI', tags: ['commerce-cloud', 'ocapi'] };
 
@@ -110,7 +111,7 @@ function commerceScenarios(b, analysis) {
     analysis.gaps.push({ label: 'RECOMMENDED', text: 'Production project: Commerce Cloud basket (write) tests were not generated. Run them in a non-production storefront.' });
   }
 
-  const scapi = b.scenario('Commerce Cloud SCAPI — Shopper search then product', 'Functional', 'SCAPI', 'Product', 'Shopper APIs: search the catalog, then get the first product. Uses the same SLAS client as OCAPI.');
+  const scapi = b.scenario(`SFCC ${channel} SCAPI — Shopper search then product`, 'Functional', 'SCAPI', 'Product', 'Shopper APIs: search the catalog, then get the first product. Uses the same SLAS client as OCAPI.');
   scapi.label = label;
   const sc = { apiType: 'SCAPI', tags: ['commerce-cloud', 'scapi'] };
   const orgPath = `/product/shopper-products/v1/organizations/${org}`;

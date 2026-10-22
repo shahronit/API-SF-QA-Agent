@@ -7,6 +7,13 @@
 const { spawn } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const { explainNetworkError } = require('../lib/errors');
+const { maskText } = require('../lib/mask');
+
+function clipStderr(s) {
+  const t = maskText(String(s || '').replace(/\s+/g, ' ').trim());
+  if (!t) return '';
+  return t.length > 280 ? t.slice(-280) : t;
+}
 
 class McpError extends Error {
   constructor(message, extra = {}) {
@@ -39,6 +46,7 @@ class McpClient {
     this.nextId = 1;
     this.initialized = false;
     this.tools = [];
+    this.stderrTail = '';
     this.events = new EventEmitter();
   }
 
@@ -132,13 +140,36 @@ class McpClient {
     if (this.proc) return;
     const parts = this.command.match(/(?:[^\s"]+|"[^"]*")+/g).map((p) => p.replace(/^"|"$/g, ''));
     const env = this.env ? { ...process.env, ...this.env } : process.env;
+    this.stderrTail = '';
     this.proc = spawn(parts[0], parts.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], env });
     this.proc.stdout.on('data', (chunk) => this.onStdout(chunk));
-    this.proc.stderr.on('data', () => { /* MCP servers log on stderr; ignore */ });
-    this.proc.on('exit', () => {
+    this.proc.stderr.on('data', (chunk) => {
+      this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-2000);
+    });
+    this.proc.on('error', (err) => {
       this.proc = null;
       this.initialized = false;
-      for (const [, { reject }] of this.pending) reject(new McpError('MCP process exited.'));
+      const msg = `MCP process failed to start (${err.code || err.message}).`;
+      for (const [, { reject }] of this.pending) {
+        reject(new McpError(msg, {
+          action: 'Check the MCP command on Connections. Suite runs continue in the platform runner when MCP is unavailable.',
+          evidence: [err.message],
+        }));
+      }
+      this.pending.clear();
+    });
+    this.proc.on('exit', (code, signal) => {
+      this.proc = null;
+      this.initialized = false;
+      const hint = clipStderr(this.stderrTail);
+      const why = code == null ? `signal ${signal}` : `code ${code}`;
+      const title = hint ? `MCP process exited (${why}). ${hint}` : `MCP process exited (${why}).`;
+      for (const [, { reject }] of this.pending) {
+        reject(new McpError(title, {
+          action: 'Postman MCP is optional — the platform runner will execute tests. To use Postman, set POSTMAN_API_KEY (or POSTMAN_<PREFIX>_API_KEY), confirm the MCP command, then Test Postman on Connections.',
+          evidence: hint ? [hint] : [],
+        }));
+      }
       this.pending.clear();
     });
   }

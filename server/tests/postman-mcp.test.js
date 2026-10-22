@@ -25,7 +25,7 @@ const tests = [
 function mockClient(handlers = {}) {
   const calls = [];
   const tools = [
-    { name: 'createCollection' }, { name: 'putCollection' }, { name: 'getCollections' },
+    { name: 'createCollection' }, { name: 'putCollection' }, { name: 'getCollections' }, { name: 'getCollection' },
     { name: 'createEnvironment' }, { name: 'putEnvironment' }, { name: 'getEnvironments' },
     { name: 'runCollection' }, { name: 'getWorkspaces' },
   ];
@@ -38,6 +38,7 @@ function mockClient(handlers = {}) {
     async callTool(name, args) {
       calls.push({ name, args });
       if (handlers[name]) return handlers[name](args, calls);
+      if (name === 'getCollection') return { collection: { info: { name: args.collectionId, schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' }, item: [] } };
       if (name === 'getCollections') return { collections: [] };
       if (name === 'getEnvironments') return { environments: [] };
       if (name === 'getWorkspaces') return { workspaces: [] };
@@ -181,6 +182,54 @@ test('runApproved maps MCP results and wipes accessToken from the Postman enviro
   assert.equal(tokenRow.value, '');
 });
 
+test('attachExisting links a collection so runApproved does not create a new one', async () => {
+  const p = projectRow('PRJ-PM-ATTACH');
+  repo.insert('projects', p);
+  const existing = {
+    info: { name: 'Storefront API', schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json', _postman_id: 'col-existing-1' },
+    item: [{ name: 'List products', request: { method: 'GET', url: 'https://shop.example/products', header: [] } }],
+  };
+  const client = mockClient({
+    getCollection: () => ({ collection: { id: 'col-existing-1', ...existing } }),
+    getCollections: () => ({ collections: [{ id: 'col-existing-1', uid: 'col-existing-1', name: 'Storefront API' }] }),
+  });
+  const pm = postmanFor(p, { client });
+  const attached = await pm.attachExisting({ uid: 'col-existing-1', importTests: true });
+  assert.equal(attached.ok, true);
+  assert.equal(attached.reuseExisting, true);
+  assert.equal(attached.collectionId, 'col-existing-1');
+  assert.equal(attached.imported, 1);
+  const again = await pm.attachExisting({ uid: 'col-existing-1', importTests: true });
+  assert.equal(again.imported, 0);
+  assert.equal(again.skipped, 1);
+  const row = repo.get('projects', p.id);
+  assert.equal(row.integrationConfig.postman.collectionId, 'col-existing-1');
+  assert.equal(row.integrationConfig.postman.reuseExisting, true);
+
+  const tcs = repo.find('test_cases', 'projectId = $p', { p: p.id });
+  const runClient = mockClient();
+  const pmRun = postmanFor(repo.get('projects', p.id), { client: runClient });
+  const out = await pmRun.runApproved(tcs, { runId: 'EX-ATT' });
+  assert.equal(out.collectionId, 'col-existing-1');
+  assert.ok(!runClient.calls.some((c) => c.name === 'createCollection'));
+  assert.ok(runClient.calls.some((c) => c.name === 'runCollection' && c.args.collectionId === 'col-existing-1'));
+});
+
+test('attachExisting from a collection file imports tests and marks reuseExisting', async () => {
+  const p = projectRow('PRJ-PM-FILE');
+  repo.insert('projects', p);
+  const col = {
+    info: { name: 'Imported BFF', schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
+    item: [{ name: 'Health', request: { method: 'GET', url: 'https://bff.example/health', header: [] } }],
+  };
+  const pm = postmanFor(p, { client: { available: false, tools: [], ensure: async () => {}, findTool: () => null, callTool: async () => { throw new Error('no'); } } });
+  const attached = await pm.attachExisting({ collection: col, importTests: true });
+  assert.equal(attached.ok, true);
+  assert.equal(attached.imported, 1);
+  assert.match(attached.collectionId, /^imported:PRJ-PM-FILE:/);
+  assert.equal(repo.get('projects', p.id).integrationConfig.postman.reuseExisting, true);
+});
+
 test('syncApproved without MCP still stores a local collection', async () => {
   const p = projectRow('PRJ-PM-LOCAL');
   repo.insert('projects', p);
@@ -192,4 +241,30 @@ test('syncApproved without MCP still stores a local collection', async () => {
   assert.match(r.notice, /Connect Postman MCP/);
   const stored = repo.find('collections', 'projectId = $p', { p: p.id });
   assert.ok(stored.length >= 1);
+});
+
+test('exportEnvironment includes Commerce organization_id', () => {
+  const env = exportEnvironment({
+    ...projectRow('PRJ-PM-CC'),
+    mode: 'live',
+    orgKind: 'sfcc-b2c',
+    instanceUrl: null,
+    integrationConfig: { commerce: { enabled: true, orgId: 'f_ecom_zzte_001' } },
+  });
+  assert.equal(env.values.find((v) => v.key === 'organization_id').value, 'f_ecom_zzte_001');
+  assert.equal(env.values.find((v) => v.key === 'ccOrgId').value, 'f_ecom_zzte_001');
+});
+
+test('McpClient reports stderr when the process exits', async () => {
+  const { McpClient } = require('../connectors/mcp');
+  const client = new McpClient({
+    command: 'sh -c "echo missing POSTMAN_API_KEY >&2; exit 1"',
+    timeoutMs: 5000,
+  });
+  await assert.rejects(() => client.ensure(), (e) => {
+    assert.match(e.message, /MCP process exited/);
+    assert.match(e.message, /POSTMAN_API_KEY/);
+    assert.match(String((e.explanation && e.explanation.action) || ''), /optional|POSTMAN_API_KEY/i);
+    return true;
+  });
 });

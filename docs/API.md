@@ -14,8 +14,8 @@ List endpoints accept `page`, `pageSize` (≤ 200), `sort`, `dir` (`ASC|DESC`) a
 | --- | --- | --- |
 | GET | `/api/health` | Liveness and version |
 | GET | `/api/meta` | Environments, API types, test types, priorities, agent modes, workflow steps, current user |
-| GET | `/api/projects/:id/workflow` | Persisted QA lifecycle (13 steps with status) |
-| PUT | `/api/projects/:id/workflow` | Restore/visit a step `{ currentStep }` |
+| GET | `/api/projects/:id/workflow` | Persisted QA lifecycle (4 stages: Connect, Create tests, Run, Report) |
+| PUT | `/api/projects/:id/workflow` | Restore/visit a stage `{ currentStep }`. Legacy 13-step ids still resolve. |
 | GET | `/api/projects/:id/jira/options` | Epics, sprints, issue types and stories for requirement picking |
 | GET | `/api/projects/:id/postman/collections` | Discover existing Postman collections (MCP, local files, generated) |
 | POST | `/api/projects/:id/postman/analyze` | Compare workspace collections with required coverage (reuse before create) |
@@ -69,13 +69,16 @@ List endpoints accept `page`, `pageSize` (≤ 200), `sort`, `dir` (`ASC|DESC`) a
 
 | Method | Path | Description |
 | --- | --- | --- |
-| POST | `/api/runs` | Start a run: `{ testCaseIds?, filter?: {priority, testType, storyKey, apiType, lastResult, tag}, mode?: "failed", fromRunId?, resolveDependencies?, label?, trigger?, confirmProductionWrites?, confirmDelete?, skipWrites? }`. In Production, returns `409 PRODUCTION_CONFIRMATION_REQUIRED` / `PRODUCTION_DELETE_CONFIRMATION_REQUIRED` until confirmed, or use `skipWrites` for read-only |
+| POST | `/api/runs` | Start a run: `{ testCaseIds?, filter?: {priority, testType, storyKey, apiType, lastResult, tag}, mode?: "failed", fromRunId?, resolveDependencies?, label?, trigger?, executor?: "playwright"\|"postman"\|"platform"\|"auto", confirmProductionWrites?, confirmDelete?, skipWrites? }`. In Production, returns `409 PRODUCTION_CONFIRMATION_REQUIRED` / `PRODUCTION_DELETE_CONFIRMATION_REQUIRED` until confirmed, or use `skipWrites` for read-only |
 | GET | `/api/runs` | Run history (`status`, `environment`, `from`, `to`, `q`) |
 | GET | `/api/runs/:id` | Run with counts, summary, created records, Jira activity, `active` |
 | GET | `/api/runs/:id/results` | Results (`status`, `priority`, `testType`, `q`) |
 | GET | `/api/runs/:id/stream` | Server-sent events: `snapshot`, `run-start`, `test-start`, `test-result`, `notice`, `stopping`, `cleanup-start`, `run-end` |
 | POST | `/api/runs/:id/stop` | Stop after the current test |
 | GET | `/api/runs/:id/analysis` | Failure categories, defect candidates, hotspots, regression recommendation, AI summary |
+| GET | `/api/runs/:id/compare` | Diff against `baseline` (run id, default `previous` = last finished run sharing tests): `newlyFailing`, `fixed`, `stillFailing`, `newTests`, `notRerun`, `slower` (≥50% and ≥200 ms), `flaky`, `verdict` |
+| GET | `/api/runs/:id/gate` | CI quality gate: `minPassRate` (default 100), `requireP0` (default true), `maxBlocked`, `maxNewFailures`, `baseline` → `{ passed, passRate, checks[] }` |
+| GET | `/api/flaky` | Tests that flipped pass↔fail at least twice across the last `window` (default 5) runs |
 | GET | `/api/results/:id` | Full request, response, assertions, Salesforce validation, contract check, analysis |
 | POST | `/api/explorer/execute` | Ad-hoc request `{ method, path, headers, query, body, variables, auth, apiType }` with the same production safety |
 | POST | `/api/explorer/generate-test` | Draft a test case from an explorer exchange |

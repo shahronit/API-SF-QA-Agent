@@ -81,8 +81,19 @@ function viewErrors(doc, label) {
 const click = (el) => { if (!el) throw new Error('element not found'); el.dispatchEvent(new Event('click', { bubbles: true })); };
 const change = (el, value) => { if (value !== undefined) el.value = value; el.dispatchEvent(new Event('change', { bubbles: true })); };
 
+function seedTempDb() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'server', 'seed.js'), '--reset'], {
+      env: { ...process.env, QA_DB_FILE: DB, QA_SKIP_DOTENV: 'true' },
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error('seed failed with code ' + code))));
+  });
+}
+
 async function main() {
-  const env = { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', QA_DB_FILE: DB, SEED_DEMO: 'true' };
+  if (!KEEP) await seedTempDb();
+  const env = { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', QA_DB_FILE: DB, SEED_DEMO: 'false', QA_SKIP_DOTENV: 'true' };
   for (const k of Object.keys(env)) if (/^(SF_|JIRA_|ANTHROPIC_)/.test(k)) delete env[k];
   const srv = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(ROOT, 'server', 'index.js')], { env, stdio: ['ignore', 'ignore', 'inherit'] });
   process.on('unhandledRejection', (e) => problems.push(`unhandledRejection: ${(e && e.stack) || e}`));
@@ -136,6 +147,16 @@ async function main() {
     await step('projects list exposes New project', async () => {
       QA.router.go('/projects'); await idle(win);
       if (!$('#view [data-act=new]')) throw new Error('new project control missing on /projects');
+      const cards = doc.querySelectorAll('#view .project-card a[href^="/projects/"]');
+      if (cards.length < 6) throw new Error(`expected every fixture project on /projects, got ${cards.length}`);
+      const listed = $('#view').textContent;
+      for (const name of ['Acme Sales Cloud', 'Acme Service Cloud', 'Acme Production Smoke', 'Globex Commerce', 'Northwind Retail', 'Globex B2C Commerce Cloud']) {
+        if (!listed.includes(name)) throw new Error(`project card missing: ${name}`);
+      }
+      const picker = [...doc.querySelectorAll('#project-switch option')].map((o) => o.textContent).join('\n');
+      if (!/Acme Sales Cloud/.test(picker) || !/Globex Commerce/.test(picker) || !/Northwind/.test(picker)) {
+        throw new Error(`project picker is missing orgs: ${picker}`);
+      }
     });
     await step('new project page is a real form', async () => {
       QA.router.go('/projects/new'); await idle(win);

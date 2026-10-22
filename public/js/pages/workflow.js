@@ -1,9 +1,16 @@
 /* QA lifecycle: one coherent sequence from project setup through reporting. */
 (() => {
   const QA = window.QA;
-  const { h, raw, ic, fmt, badge, method, on, errorBox, loading, empty, toast, toastError, withBusy, esc, json, confirm } = QA.ui;
+  const { h, ic, fmt, badge, on, errorBox, loading, empty, toast, toastError, withBusy, esc } = QA.ui;
   const C = QA.components;
   const api = QA.api;
+
+  const LEGACY = {
+    project: 'connect', jira: 'connect', salesforce: 'connect', discovery: 'connect', postman: 'connect',
+    generate: 'create', review: 'create', approve: 'create',
+    execute: 'run', validate: 'run', analysis: 'run',
+    defect: 'report', report: 'report',
+  };
 
   const MARK = {
     completed: { icon: 'check', cls: 'ok', title: 'Completed' },
@@ -39,17 +46,17 @@
         const current = wf.steps.find((s) => s.id === wf.currentStep) || wf.steps[0];
         view.innerHTML = String(h`${C.pageHead('How QA works', h`${p.name} (${p.environment}). You left off at: ${current.label}. ${completedLine(wf)}`,
           h`<a class="btn primary" href="/workflow/${current.id}" data-link data-primary>${ic('play')} Continue: ${current.label}</a>`)}
-          ${C.pageIntro({ what: 'Thirteen steps from a new project to a downloadable report. Work them in order, or jump to where you stopped.', next: 'Click Continue for the highlighted step, or click any row. Completed steps stay ticked so you can see progress.' })}
-          <div class="card">${QA.ui.table({ rows: wf.steps, rowAttrs: (s) => `data-href="/workflow/${esc(s.id)}"`, columns: [
-            { key: 'status', label: '', render: (s) => mark(s.status, s.id === wf.currentStep) },
-            { key: 'group', label: 'Stage' },
-            { key: 'label', label: 'Step' },
-            { key: 'status2', label: 'Status', render: (s) => badge(s.status.replace(/_/g, '-'), s.status.replace(/_/g, ' ')) },
-            { key: 'primary', label: 'What to do', render: (s) => h`<span class="small wrap">${s.primary}</span>` },
-          ] })}</div>`);
+          ${C.pageIntro({ what: 'Four stages: connect the org, create tests from Jira, run them, then report. Review, Salesforce checks and defects live inside those stages.', next: 'Click Continue, or open a stage. You can jump around — completed stages stay ticked.' })}
+          <div class="grid g-2">${wf.steps.map((s) => h`<a class="card project-card ${s.id === wf.currentStep ? 'current' : ''}" href="/workflow/${esc(s.id)}" data-link>
+            <div class="card-head">${mark(s.status, s.id === wf.currentStep)}<h2>${s.label}</h2>${badge(s.status.replace(/_/g, '-'), s.status.replace(/_/g, ' '))}</div>
+            <div class="card-body">
+              <p class="desc wrap">${s.help}</p>
+              <p class="small muted">${s.primary}</p>
+            </div>
+          </a>`)}</div>`);
         return null;
       }
-      const step = wf.steps.find((s) => s.id === stepId) || wf.steps[0];
+      const step = wf.steps.find((s) => s.id === stepId) || wf.steps.find((s) => s.id === LEGACY[stepId]) || wf.steps[0];
       const next = wf.steps.find((s) => s.id === step.next) || null;
       QA.router.setCrumbs([{ label: 'How QA works', href: '/workflow' }, { label: step.label }]);
       view.innerHTML = String(h`
@@ -59,7 +66,7 @@
         <div data-step></div>`);
       const pane = view.querySelector('[data-step]');
       try {
-        await renderStep(pane, p, step, wf);
+        await renderStep(pane, p, step, wf, ctx);
       } catch (e) { pane.innerHTML = String(errorBox(e)); }
       return null;
     },
@@ -71,9 +78,23 @@
     return h`${done.length ? h`Completed: ${done.join(', ')}. ` : ''}${open.length ? h`Still open: ${open.slice(0, 4).join(', ')}${open.length > 4 ? '…' : ''}.` : 'All steps complete.'}`;
   }
 
-  async function renderStep(pane, p, step, wf) {
-    const fn = STEPS[step.id] || STEPS.project;
-    await fn(pane, p, step, wf);
+  async function renderStep(pane, p, step, wf, ctx = {}) {
+    const requested = (ctx.params && ctx.params.step) || '';
+    const innerId = (ctx.query && ctx.query.tab)
+      || (LEGACY[requested] && requested !== step.id ? requested : null)
+      || ((step.parts && step.parts[0] && step.parts[0].id) || step.id);
+    const tabs = (step.parts || []).map((x) => ({ id: x.id, label: x.label || x.id }));
+    pane.innerHTML = String(h`${tabs.length ? C.tabs(tabs, innerId) : ''}<div data-inner></div>`);
+    const inner = pane.querySelector('[data-inner]');
+    const fn = STEPS[innerId] || (step.parts && STEPS[step.parts[0].id]) || STEPS.project;
+    if (fn) await fn(inner, p, step, wf);
+    else inner.innerHTML = String(empty({ title: 'Nothing to show' }));
+    if (tabs.length) {
+      on(pane, 'click', '[data-tab]', (e, el) => {
+        e.preventDefault();
+        QA.router.go(`/workflow/${step.id}?tab=${el.dataset.tab}`);
+      });
+    }
   }
 
   const STEPS = {
@@ -160,7 +181,7 @@
       const src = conn.salesforceSource || 'mcp';
       const sf = p.connection.salesforce;
       pane.innerHTML = String(h`<div class="card"><div class="card-head"><div class="card-kicker">${C.layerTag('backend')}<h2>Salesforce (backend APIs)</h2></div>${badge(sf.status, sf.label)}</div><div class="card-body">
-        <p class="conn-status-line wrap">${sf.label || 'Not connected.'} ${(sf.types && sf.types.length) ? sf.types.join(' · ') + '.' : ''} Org REST, Apex REST, Experience/B2B and SFCC testers follow what was detected after login.</p>
+        <p class="conn-status-line wrap">${sf.label || 'Not connected.'} ${(sf.types && sf.types.length) ? sf.types.join(' · ') + '.' : ''} Org REST, Apex REST, Experience Cloud B2B/B2C and SFCC B2B/B2C testers follow the org kind detected after login — each kind is its own project.</p>
         <p class="small muted wrap">Log in opens the org login page in your browser (Salesforce CLI web login, or Account Manager / Business Manager for SFCC). Tokens stay in the CLI. MCP and connected-app settings stay under Advanced.</p>
         <div class="row mt wrap"><button class="btn primary" data-act="login-sf">${ic('link')} Log in</button><button class="btn" data-act="test">${ic('refresh')} Test Salesforce</button><a class="btn" href="/projects/${p.id}?tab=connection" data-link>Open Connections</a></div>
         <details class="adv-block"><summary>Advanced — metadata source</summary>
@@ -226,13 +247,14 @@
     },
 
     async postman(pane, p) {
-      pane.innerHTML = String(h`${C.pageHead ? '' : ''}<div class="card"><div class="card-head"><div class="card-kicker">${C.layerTag('frontend')}<h2>HTTP / Postman collections</h2></div><span class="sub">Frontend APIs: custom REST, storefront, middleware, BFF.</span></div>
+      pane.innerHTML = String(h`<div class="card"><div class="card-head"><div class="card-kicker">${C.layerTag('frontend')}<h2>HTTP / Postman collections</h2></div><span class="sub">Frontend APIs: custom REST, storefront, middleware, BFF.</span></div>
         <div class="card-body">
           <div class="row wrap"><button class="btn primary" data-act="discover">${ic('search')} Analyze workspace</button>
+            <button class="btn" data-act="use-existing">${ic('folder')} Use existing collection</button>
             <button class="btn" data-act="create">${ic('plus')} Create new collection</button>
-            <a class="btn" href="/automation" data-link>Open collection export</a>
+            <a class="btn" href="/automation" data-link>Import collection file</a>
             <a class="btn" href="/projects/${p.id}?tab=connection" data-link>Postman connection</a></div>
-          <p class="small muted mt wrap">Postman is the frontend / HTTP testing layer. Salesforce MCP/CLI supplies backend metadata and record validation only. Existing collections are searched before anything is created.</p>
+          <p class="small muted mt wrap">Pick a collection this project already has, or import any Postman version (v1 / v2 / v2.1) on HTTP / Postman — the platform detects the org and reuses or creates the project. Salesforce MCP/CLI is backend metadata only.</p>
           <div data-out class="mt">${loading(4)}</div>
         </div></div>`);
       const out = pane.querySelector('[data-out]');
@@ -245,6 +267,13 @@
       }
       analyze();
       on(pane, 'click', '[data-act=discover]', analyze);
+      on(pane, 'click', '[data-act=use-existing]', (e, el) => withBusy(el, async () => {
+        out.innerHTML = String(loading(6));
+        try {
+          const r = await api.get(`/api/projects/${p.id}/postman/collections`);
+          drawCollectionPicker(out, p, r.items || [], r);
+        } catch (err) { out.innerHTML = String(errorBox(err)); }
+      }));
       on(pane, 'click', '[data-act=create]', (e, el) => withBusy(el, async () => {
         try {
           const r = await api.post(`/api/projects/${p.id}/postman/create`, {});
@@ -256,7 +285,9 @@
 
     async generate(pane, p) {
       const stories = await api.get(`/api/stories?projectId=${p.id}&pageSize=40`);
-      pane.innerHTML = String(h`<div class="card"><div class="card-head"><h2>Generate API tests from Jira</h2></div>
+      const g = (QA.state.meta && QA.state.meta.generators) || {};
+      pane.innerHTML = String(h`<div class="card"><div class="card-head"><h2>Generate API tests</h2></div>
+        <div class="card-body"><p class="small wrap">Source: Jira ticket, integration doc, or both. Engine baseline plus Cursor CLI (${g.cursorInstalled ? (g.cursorCliEnabled ? 'enabled' : 'installed, flag off') : 'not installed'}) then Gemini CLI (${g.geminiInstalled ? (g.geminiCliEnabled ? 'enabled' : 'installed, flag off') : 'not installed'}). Open a story to pick the source. You still approve before run.</p></div>
         ${QA.ui.table({ rows: stories.items, emptyState: empty({ title: 'No stories', text: 'Sync Jira first.', action: h`<a class="btn primary" href="/workflow/jira" data-link>Open Jira requirement</a>` }), columns: [
           { key: 'key', label: 'Jira', render: (s) => h`<a class="mono" href="/stories/${s.key}" data-link>${s.key}</a>` },
           { key: 'summary', label: 'Summary', render: (s) => h`<div class="wrap">${s.summary}</div>` },
@@ -280,6 +311,7 @@
         ${QA.ui.table({ rows: list.slice(0, 30), emptyState: empty({ title: 'No proposals', text: 'Generate tests from a Jira story first.', action: h`<a class="btn primary" href="/workflow/generate" data-link>Generate tests</a>` }), columns: [
           { key: 'id', label: 'Proposal', render: (r) => h`<a class="mono" href="/generate/${r.id}" data-link>${r.id}</a>` },
           { key: 'storyKey', label: 'Jira' },
+          { key: 'generator', label: 'Generator', render: (r) => h`<span class="tag mono">${r.generator || 'engine'}</span>` },
           { key: 'status', label: 'Status', render: (r) => badge(r.status) },
           { key: 'createdAt', label: 'Created', render: (r) => fmt.ago(r.createdAt) },
         ] })}</div>`);
@@ -292,19 +324,13 @@
 
     async execute(pane, p) {
       const runs = await api.get(`/api/runs?projectId=${p.id}&pageSize=8`);
-      const pm = (p.connection && p.connection.postman) || {};
-      const mcpReady = p.mode !== 'demo' && (['connected', 'configured', 'ok'].includes(pm.status) || pm.kind === 'mcp');
       pane.innerHTML = String(h`<div class="card"><div class="card-head"><h2>API execution</h2><div class="row">
         <button class="btn primary" data-act="run">${ic('play')} Run all</button>
         <button class="btn" data-act="failed">${ic('refresh')} Re-run failed</button>
         <a class="btn" href="/execution" data-link>Open Test Runs</a></div></div>
         <div class="card-body">
-          ${mcpReady
-            ? h`<div class="callout success">${ic('check')}<div class="small wrap">Postman MCP is connected. Run executes the synced collection in Postman. If MCP is down mid-run, the platform runner takes over.</div></div>`
-            : p.mode === 'demo'
-              ? h`<div class="callout info">${ic('info')}<div class="small wrap">Demo runs use the platform simulator. Approve still upserts the collection locally (and to Postman MCP if connected). Use a live project to execute via Postman MCP.</div></div>`
-              : h`<div class="callout info">${ic('info')}<div class="small wrap">Postman MCP is not connected — this run uses the platform runner. <a href="/projects/${p.id}?tab=connection" data-link>Connect Postman</a> (MCP URL or <code>POSTMAN_MCP_COMMAND</code> + API key in .env) to execute in Postman.</div></div>`}
-          <p class="small muted wrap mt">Approved tests are already in the Postman collection after Approve. Results still land in Test Runs with tokens masked.</p>
+          ${h`<div class="callout info">${ic('play')}<div class="small wrap">Start a run and pick the runner: Playwright MCP, Postman MCP, or the platform. Connect them on <a href="/projects/${p.id}?tab=connection" data-link>Connections</a>. Demo always uses the simulator. Tokens stay masked; Production writes still need confirmation.</div></div>`}
+          <p class="small muted wrap mt">After a run, use the Salesforce data and Failures tabs here, or open Test Runs.</p>
         </div>
         ${QA.ui.table({ rows: runs.items, columns: [
           { key: 'id', label: 'Run', render: (r) => h`<a class="mono" href="/execution/${r.id}" data-link>${r.id}</a>` },
@@ -331,22 +357,73 @@
     },
 
     async defect(pane) {
-      QA.router.go('/defects');
+      pane.innerHTML = String(h`<div class="card"><div class="card-head"><h2>Raise defects</h2></div><div class="card-body">
+        <p class="small wrap">Open a failed result, preview the masked Jira draft, then create. Nothing is posted until you confirm.</p>
+        <div class="row mt"><a class="btn primary" href="/defects" data-link>${ic('bug')} Open defects</a><a class="btn" href="/execution" data-link>Failed tests</a></div>
+      </div></div>`);
     },
 
     async report(pane) {
-      QA.router.go('/reports');
+      pane.innerHTML = String(h`<div class="card"><div class="card-head"><h2>Download report</h2></div><div class="card-body">
+        <p class="small wrap">Export PDF, Excel, CSV or HTML. Tokens and credentials are masked. Traceability shows story → test → run → defect.</p>
+        <div class="row mt"><a class="btn primary" href="/reports" data-link>${ic('download')} Open reports</a><a class="btn" href="/traceability" data-link>Traceability</a></div>
+      </div></div>`);
     },
   };
 
+  function collectionPickerTable(items, linkedId) {
+    return QA.ui.table({
+      rows: items,
+      emptyState: empty({ title: 'No collections listed', text: 'Import a Collection v2.1 JSON file, or connect a Postman workspace.' }),
+      columns: [
+        { key: 'name', label: 'Collection', render: (c) => h`<div class="wrap">${c.name}${(c.linked || (linkedId && c.uid === linkedId)) ? ' · in use' : ''}</div><div class="cell-sub">${c.source || ''} · ${c.requestCount || 0} requests${c.score ? ` · match ${c.score}` : ''}</div>` },
+        { key: 'workspace', label: 'Workspace', render: (c) => c.workspace || '—' },
+        { key: 'act', label: '', render: (c) => h`<button class="btn xs primary" data-act="use-col" data-uid="${c.uid}">Use this collection</button>` },
+      ],
+    });
+  }
+
+  function bindUseCollection(root, p, after) {
+    on(root, 'click', '[data-act=use-col]', (e, el) => withBusy(el, async () => {
+      try {
+        const r = await api.post(`/api/projects/${p.id}/postman/attach`, { uid: el.dataset.uid, importTests: true });
+        toast(r.notice || `Using “${r.name}” on this project.`, 'ok');
+        if (after) await after();
+      } catch (err) { toastError(err); }
+    }));
+  }
+
+  function drawCollectionPicker(out, p, items, meta = {}) {
+    const linked = meta.linkedCollectionId;
+    out.innerHTML = String(h`
+      <div class="callout info">${ic('folder')}<div class="small wrap">${linked ? `This project is linked to <code>${linked}</code>. Choose another collection to switch, or keep using it on Run.` : 'Choose an existing collection for this project. Approve and Run will reuse it instead of creating a new one.'}</div></div>
+      ${collectionPickerTable(items, linked)}
+      <div class="row mt"><a class="btn" href="/automation" data-link>Import a collection file</a></div>
+    `);
+    bindUseCollection(out, p, async () => {
+      const r = await api.post(`/api/projects/${p.id}/postman/analyze`, {});
+      drawAnalyze(out, p, r);
+    });
+  }
+
   function drawAnalyze(out, p, r) {
+    const discovered = r.discovered || [];
+    const linked = r.linkedCollectionId;
     if (r.action === 'create') {
-      out.innerHTML = String(h`<div class="callout">${ic('info')}<div class="small wrap"><b>No suitable collection found.</b> ${r.reason} Folders that would be created: ${(r.folders || []).join(', ') || 'only those required by tests'}.</div></div>`);
+      out.innerHTML = String(h`<div class="callout">${ic('info')}<div class="small wrap"><b>No collection auto-selected.</b> ${r.reason} Folders that would be created: ${(r.folders || []).join(', ') || 'only those required by tests'}.</div></div>
+        ${discovered.length ? collectionPickerTable(discovered, linked) : ''}
+        <div class="row mt"><a class="btn" href="/automation" data-link>Import collection file</a></div>`);
+      bindUseCollection(out, p, async () => {
+        const again = await api.post(`/api/projects/${p.id}/postman/analyze`, {});
+        drawAnalyze(out, p, again);
+      });
       return;
     }
     const d = r.diff || { summary: {}, existing: [], missing: [], changed: [], duplicate: [], recommended: [], variables: { warnings: [] }, changes: [] };
+    const inUse = r.collection && (r.collection.linked || (linked && r.collection.uid === linked));
     out.innerHTML = String(h`
-      <div class="callout ${r.action === 'reuse' ? 'success' : 'info'}">${ic(r.action === 'reuse' ? 'check' : 'layers')}<div class="small wrap"><b>${r.collection.name}</b> (${r.collection.source}). ${r.action === 'reuse' ? 'Existing requests will be reused. No duplicate POST will be created.' : 'Review the difference before anything is written to Postman.'}</div></div>
+      <div class="callout ${r.action === 'reuse' ? 'success' : 'info'}">${ic(r.action === 'reuse' ? 'check' : 'layers')}<div class="small wrap"><b>${r.collection.name}</b> (${r.collection.source}). ${r.action === 'reuse' ? 'Existing requests will be reused. No duplicate POST will be created.' : 'Review the difference before anything is written to Postman.'}${inUse ? ' Linked to this project.' : ''}</div></div>
+      <div class="row wrap mt"><button class="btn primary" data-act="use-col" data-uid="${r.collection.uid}">${inUse ? 'Keep using this collection' : `Use “${r.collection.name}”`}</button></div>
       <div class="stat-inline mt"><span><b>${d.summary.existing || 0}</b> existing</span><span><b>${d.summary.missing || 0}</b> missing</span><span><b>${d.summary.changed || 0}</b> changed</span><span><b>${d.summary.duplicate || 0}</b> duplicate</span><span><b>${d.summary.recommended || 0}</b> recommended</span></div>
       ${d.variables && d.variables.warnings && d.variables.warnings.length ? h`<div class="callout warn mt">${ic('alert')}<div class="small wrap">${d.variables.warnings.map((w) => w.message).join(' ')}</div></div>` : ''}
       ${QA.ui.table({ rows: [
@@ -360,6 +437,7 @@
         { key: 'key', label: 'Request', render: (x) => h`<code class="mono small wrap">${x.key}</code>` },
         { key: 'detail', label: 'Detail', render: (x) => h`<div class="wrap small">${x.detail}</div>` },
       ] })}
+      ${discovered.length > 1 ? h`<h3 class="mt">Other collections</h3>${collectionPickerTable(discovered.filter((c) => c.uid !== r.collection.uid), linked)}` : ''}
       ${r.action === 'update' ? h`<div class="card mt"><div class="card-head"><h2>Collection: ${r.collection.name}</h2></div><div class="card-body">
         <ul class="list">${(d.changes || []).map((c) => h`<li class="small wrap">${c}</li>`)}</ul>
         <div class="row mt"><button class="btn primary" data-approve>${ic('check')} Approve changes</button><button class="btn" data-reject>Reject</button><a class="btn" href="/automation" data-link>Edit in CI export</a></div>
@@ -371,6 +449,10 @@
       else await api.post(`/api/projects/${p.id}/postman/proposals/${rec.id}/reject`, {});
       toast(status === 'approve' ? 'Collection update approved and synced to Postman when MCP is connected.' : 'Collection changes rejected.', status === 'approve' ? 'ok' : 'warn');
     };
+    bindUseCollection(out, p, async () => {
+      const again = await api.post(`/api/projects/${p.id}/postman/analyze`, {});
+      drawAnalyze(out, p, again);
+    });
     on(out, 'click', '[data-approve]', (e, el) => withBusy(el, () => goProposal('approve')));
     on(out, 'click', '[data-reject]', (e, el) => withBusy(el, () => goProposal('reject')));
   }

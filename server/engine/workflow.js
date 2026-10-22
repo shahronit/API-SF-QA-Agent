@@ -1,34 +1,86 @@
 'use strict';
 /**
- * Persisted QA lifecycle for a project. Status is derived from existing
- * records (stories, proposals, runs, …) and merged with the last visited step
- * so returning users restore where they left off.
+ * Persisted QA lifecycle for a project. Four user-facing stages
+ * (Connect → Create tests → Run → Report). Inner work (Jira, describe,
+ * review, Salesforce validation, defects) stays on those stage pages.
+ * Legacy 13-step ids still resolve so old bookmarks and touch() calls work.
  */
 const { repo, get, now } = require('../db');
 
 const STATUSES = ['not_started', 'in_progress', 'completed', 'failed', 'blocked', 'requires_approval'];
 
 const STEPS = [
-  { id: 'project', group: 'Start', label: 'Set up project', help: 'Name the workspace, pick QA / UAT / Production, and choose Demo or a live org.', primary: 'Save, then pull Jira tickets', next: 'jira' },
-  { id: 'jira', group: 'Requirements', label: 'Pull Jira tickets', help: 'Bring in the stories you want to cover so we can turn them into API tests.', primary: 'Pick a ticket, then connect Salesforce', next: 'salesforce' },
-  { id: 'salesforce', group: 'Connect', label: 'Connect Salesforce (backend)', help: 'Backend APIs: org REST, Apex REST, Bulk, Composite. Stay in Demo or point at a live org. Passwords stay in .env — this screen only stores a prefix.', primary: 'Test Salesforce, then find backend APIs', next: 'discovery' },
-  { id: 'discovery', group: 'Discover', label: 'Find Salesforce APIs', help: 'See which Salesforce objects and backend endpoints this org exposes.', primary: 'Review objects, then look for frontend HTTP collections', next: 'postman' },
-  { id: 'postman', group: 'Discover', label: 'Find HTTP collections (frontend)', help: 'Frontend / HTTP APIs: custom REST, storefront, middleware, BFF. Reuse a Postman collection when it already matches.', primary: 'Reuse or create a collection, then create tests', next: 'generate' },
-  { id: 'generate', group: 'Tests', label: 'Create tests', help: 'Generate API test cases from the Jira ticket you selected.', primary: 'Generate tests from the ticket', next: 'review' },
-  { id: 'review', group: 'Tests', label: 'Review tests', help: 'Check coverage and drop anything that should not run.', primary: 'Review coverage, then approve selected tests', next: 'approve' },
-  { id: 'approve', group: 'Tests', label: 'Approve tests', help: 'Only approved tests are allowed to run. Approving upserts them into a Postman collection (Postman MCP when connected).', primary: 'Approve selected tests, then run them', next: 'execute' },
-  { id: 'execute', group: 'Tests', label: 'Run tests', help: 'Execute the approved suite via Postman MCP when connected, otherwise in the platform runner.', primary: 'Run approved tests', next: 'validate' },
-  { id: 'validate', group: 'Results', label: 'Check Salesforce data', help: 'Compare API payloads with the records actually stored in Salesforce.', primary: 'Compare API payloads with Salesforce records', next: 'analysis' },
-  { id: 'analysis', group: 'Results', label: 'Understand results', help: 'Separate product bugs from test issues before you raise tickets.', primary: 'Classify failures, then raise defects', next: 'defect' },
-  { id: 'defect', group: 'Results', label: 'Raise defects', help: 'Preview a Jira bug from a confirmed failure. Nothing is created until you confirm.', primary: 'Preview and create Jira defects for confirmed failures', next: 'report' },
-  { id: 'report', group: 'Results', label: 'Download report', help: 'Export a stakeholder report. Tokens and credentials are masked.', primary: 'Export the run report and traceability', next: null },
+  {
+    id: 'connect', label: 'Connect',
+    help: 'Name the workspace, pull Jira tickets, and connect Salesforce plus HTTP/Postman. Passwords stay in .env.',
+    primary: 'Finish connections, then create tests', next: 'create',
+    parts: [
+      { id: 'project', label: 'Project' },
+      { id: 'jira', label: 'Jira tickets' },
+      { id: 'salesforce', label: 'Salesforce' },
+      { id: 'discovery', label: 'Salesforce APIs' },
+      { id: 'postman', label: 'HTTP / Postman' },
+    ],
+  },
+  {
+    id: 'create', label: 'Create tests',
+    help: 'Generate API tests from a Jira ticket, review coverage, and approve what should run.',
+    primary: 'Generate, review and approve tests', next: 'run',
+    parts: [
+      { id: 'generate', label: 'Generate' },
+      { id: 'review', label: 'Review' },
+      { id: 'approve', label: 'Approve' },
+    ],
+  },
+  {
+    id: 'run', label: 'Run',
+    help: 'Execute the approved suite. Pick Playwright MCP, Postman MCP, or the platform runner. Writes are re-read from Salesforce.',
+    primary: 'Run tests and check Salesforce data', next: 'report',
+    parts: [
+      { id: 'execute', label: 'Execute' },
+      { id: 'validate', label: 'Salesforce data' },
+      { id: 'analysis', label: 'Failures' },
+    ],
+  },
+  {
+    id: 'report', label: 'Report',
+    help: 'Raise Jira defects from confirmed failures and export a masked report.',
+    primary: 'Raise defects and download the report', next: null,
+    parts: [
+      { id: 'defect', label: 'Defects' },
+      { id: 'report', label: 'Download' },
+    ],
+  },
 ];
 
-function stepMeta(id) {
-  return STEPS.find((s) => s.id === id) || STEPS[0];
+const LEGACY_TO_STAGE = {
+  project: 'connect', jira: 'connect', salesforce: 'connect', discovery: 'connect', postman: 'connect',
+  generate: 'create', review: 'create', approve: 'create',
+  execute: 'run', validate: 'run', analysis: 'run',
+  defect: 'report', report: 'report',
+  connect: 'connect', create: 'create', run: 'run',
+};
+
+function resolveStep(id) {
+  if (STEPS.some((s) => s.id === id)) return id;
+  return LEGACY_TO_STAGE[id] || 'connect';
 }
 
-function compute(project) {
+function stepMeta(id) {
+  const resolved = resolveStep(id);
+  return STEPS.find((s) => s.id === resolved) || STEPS[0];
+}
+
+function rollup(statuses) {
+  if (statuses.includes('blocked')) return 'blocked';
+  if (statuses.includes('requires_approval')) return 'requires_approval';
+  if (statuses.includes('failed')) return 'failed';
+  if (statuses.length && statuses.every((s) => s === 'completed')) return 'completed';
+  if (statuses.some((s) => s === 'in_progress' || s === 'completed')) return 'in_progress';
+  return 'not_started';
+}
+
+function computeInner(project) {
   const pid = project.id;
   const stories = get('SELECT COUNT(*) AS n FROM stories WHERE projectId = $p', { p: pid }).n;
   const pending = get("SELECT COUNT(*) AS n FROM proposals WHERE projectId = $p AND status = 'proposed'", { p: pid }).n;
@@ -52,7 +104,7 @@ function compute(project) {
   const sfLive = project.mode === 'live';
   const sfOk = !sfLive || project.mode === 'demo' || Boolean(project.instanceUrl || project.credentialRef);
 
-  const steps = {
+  const inner = {
     project: {
       status: project.name && project.environment && project.apiVersion ? 'completed' : 'in_progress',
       detail: { name: project.name, environment: project.environment, sfOrg: project.sfOrg, jira: project.jiraProjectKey },
@@ -108,10 +160,22 @@ function compute(project) {
   };
 
   if (sfLive && !project.credentialRef && project.mode === 'live' && !ic.salesforceMcp) {
-    steps.salesforce.status = 'blocked';
-    steps.salesforce.detail.reason = 'Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled.';
+    inner.salesforce.status = 'blocked';
+    inner.salesforce.detail.reason = 'Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled.';
   }
 
+  return inner;
+}
+
+function compute(project) {
+  const inner = computeInner(project);
+  const steps = {};
+  for (const s of STEPS) {
+    const partStatus = s.parts.map((p) => (inner[p.id] && inner[p.id].status) || 'not_started');
+    const detail = {};
+    for (const p of s.parts) Object.assign(detail, (inner[p.id] && inner[p.id].detail) || {});
+    steps[s.id] = { status: rollup(partStatus), detail, parts: s.parts.map((p) => ({ ...p, ...(inner[p.id] || {}) })) };
+  }
   return steps;
 }
 
@@ -126,42 +190,33 @@ function getState(project) {
   const steps = {};
   for (const s of STEPS) {
     const base = computed[s.id] || { status: 'not_started', detail: {} };
-    const over = overrides[s.id] || {};
+    const over = overrides[s.id] || overrides[LEGACY_TO_STAGE[s.id]] || {};
     steps[s.id] = {
       ...s,
       status: STATUSES.includes(over.status) ? over.status : base.status,
       detail: { ...(base.detail || {}), ...(over.detail || {}) },
+      parts: base.parts || s.parts,
       updatedAt: over.updatedAt || (row && row.updatedAt) || null,
     };
   }
   const firstOpen = STEPS.find((s) => !['completed'].includes(steps[s.id].status));
-  const currentStep = (row && row.currentStep && steps[row.currentStep]) ? row.currentStep : (firstOpen ? firstOpen.id : 'report');
+  const stored = row && row.currentStep ? resolveStep(row.currentStep) : null;
+  const currentStep = (stored && steps[stored]) ? stored : (firstOpen ? firstOpen.id : 'report');
   return {
     projectId: project.id,
     currentStep,
     current: steps[currentStep],
     next: stepMeta(steps[currentStep].next || currentStep),
     steps: STEPS.map((s) => steps[s.id]),
-    groups: group(STEPS.map((s) => steps[s.id])),
     updatedAt: (row && row.updatedAt) || now(),
   };
 }
 
-function group(steps) {
-  const out = [];
-  for (const s of steps) {
-    const last = out[out.length - 1];
-    if (!last || last.group !== s.group) out.push({ group: s.group, items: [s] });
-    else last.items.push(s);
-  }
-  return out;
-}
-
 function persist(projectId, patch) {
-  const existing = rowFor(projectId) || { projectId, currentStep: 'project', steps: {}, updatedAt: now() };
+  const existing = rowFor(projectId) || { projectId, currentStep: 'connect', steps: {}, updatedAt: now() };
   const next = {
     projectId,
-    currentStep: patch.currentStep || existing.currentStep,
+    currentStep: resolveStep(patch.currentStep || existing.currentStep),
     steps: { ...(existing.steps || {}), ...(patch.steps || {}) },
     updatedAt: now(),
   };
@@ -171,19 +226,19 @@ function persist(projectId, patch) {
 }
 
 function visit(project, stepId) {
-  const id = STEPS.some((s) => s.id === stepId) ? stepId : 'project';
+  const id = resolveStep(stepId);
   persist(project.id, { currentStep: id });
   const { audit } = require('../db');
-  audit('workflow', 'workflow.visit', { projectId: project.id, detail: { step: id } });
+  audit('workflow', 'workflow.visit', { projectId: project.id, detail: { step: id, requested: stepId } });
   return getState(repo.get('projects', project.id) || project);
 }
 
 function touch(projectId, stepId, status, detail) {
-  if (!STEPS.some((s) => s.id === stepId)) return;
+  const id = resolveStep(stepId);
   const existing = rowFor(projectId);
   const steps = { ...((existing && existing.steps) || {}) };
-  steps[stepId] = { status: status || (steps[stepId] && steps[stepId].status), detail: detail || (steps[stepId] && steps[stepId].detail) || {}, updatedAt: now() };
-  persist(projectId, { currentStep: stepId, steps });
+  steps[id] = { status: status || (steps[id] && steps[id].status), detail: detail || (steps[id] && steps[id].detail) || {}, updatedAt: now() };
+  persist(projectId, { currentStep: id, steps });
 }
 
-module.exports = { STEPS, STATUSES, getState, visit, touch, compute, stepMeta };
+module.exports = { STEPS, STATUSES, LEGACY_TO_STAGE, resolveStep, getState, visit, touch, compute, stepMeta };

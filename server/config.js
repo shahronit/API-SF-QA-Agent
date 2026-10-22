@@ -26,7 +26,8 @@ function loadDotEnv(file) {
   }
 }
 
-loadDotEnv(path.join(ROOT, '.env'));
+// Under `node --test` the developer's real credentials and MCP commands must not leak into tests.
+if (!process.env.NODE_TEST_CONTEXT && process.env.QA_SKIP_DOTENV !== 'true') loadDotEnv(path.join(ROOT, '.env'));
 
 const env = (k, d = '') => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 
@@ -116,6 +117,14 @@ function httpCredentials(ref) {
   return { token: token || '', baseUrl: baseUrl || '' };
 }
 
+function playwrightSettings(ref) {
+  const p = `PLAYWRIGHT_${normRef(ref)}_`;
+  const url = env(p + 'MCP_URL') || env('PLAYWRIGHT_MCP_URL');
+  const command = env(p + 'MCP_COMMAND') || env('PLAYWRIGHT_MCP_COMMAND');
+  if (!url && !command) return null;
+  return { url, command, timeoutMs: Number(env(p + 'MCP_TIMEOUT_MS') || env('PLAYWRIGHT_MCP_TIMEOUT_MS') || 30000) };
+}
+
 /** Presence-only report — safe to send to the UI. */
 function credentialStatus(sfRef, jiraRef, commerceRef) {
   const p = `SF_${normRef(sfRef)}_`;
@@ -160,6 +169,12 @@ function credentialStatus(sfRef, jiraRef, commerceRef) {
       baseUrl: env(`HTTP_${normRef(sfRef)}_BASE_URL`) || env('HTTP_BASE_URL') || null,
       configured: Boolean(httpCredentials(sfRef) || env('HTTP_BASE_URL') || env('HTTP_BEARER_TOKEN')),
     },
+    playwright: {
+      prefix: sfRef ? `PLAYWRIGHT_${normRef(sfRef)}_` : 'PLAYWRIGHT_',
+      mcpUrl: Boolean(env(`PLAYWRIGHT_${normRef(sfRef)}_MCP_URL`) || env('PLAYWRIGHT_MCP_URL')),
+      mcpCommand: Boolean(env(`PLAYWRIGHT_${normRef(sfRef)}_MCP_COMMAND`) || env('PLAYWRIGHT_MCP_COMMAND')),
+      configured: Boolean(playwrightSettings(sfRef)),
+    },
   };
 }
 
@@ -175,4 +190,4 @@ function secretValues() {
 
 const SF_UNAVAILABLE_MESSAGE = 'Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled.';
 
-module.exports = { SF_UNAVAILABLE_MESSAGE, config, salesforceCredentials, jiraCredentials, salesforceMcpSettings, commerceCredentials, httpCredentials, postmanSettings, credentialStatus, secretValues, normRef };
+module.exports = { SF_UNAVAILABLE_MESSAGE, config, salesforceCredentials, jiraCredentials, salesforceMcpSettings, commerceCredentials, httpCredentials, postmanSettings, playwrightSettings, credentialStatus, secretValues, normRef };

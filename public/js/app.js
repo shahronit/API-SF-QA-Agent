@@ -7,11 +7,7 @@
   const $ = (id) => document.getElementById(id);
 
   const WF_NAME = {
-    project: '1. Set up project', jira: '2. Pull Jira tickets', salesforce: '3. Connect Salesforce (backend)',
-    discovery: '4. Find Salesforce APIs', postman: '5. Find HTTP / Postman (frontend)', generate: '6. Create tests',
-    review: '7. Review tests', approve: '8. Approve tests', execute: '9. Run tests',
-    validate: '10. Check Salesforce data', analysis: '11. Understand results', defect: '12. Raise defects',
-    report: '13. Download report',
+    connect: '1. Connect', create: '2. Create tests', run: '3. Run', report: '4. Report',
   };
   const NAV = [
     { label: 'Start here', items: [['/projects/new', 'New project', 'plus'], ['/projects', 'All projects', 'folder'], ['/workflow', 'How QA works', 'layers']] },
@@ -52,6 +48,7 @@
       <div class="conn-line"><span class="conn-dot ${dotCls(sf && sf.status)}"></span><span>Salesforce: ${short(sf)}</span></div>
       <div class="conn-line"><span class="conn-dot ${dotCls(jira && jira.status)}"></span><span>Jira: ${short(jira)}</span></div>
       <div class="conn-line"><span class="conn-dot ${dotCls(pm && pm.status)}"></span><span>HTTP / Postman: ${short(pm)}</span></div>
+      ${p.connection && p.connection.playwright && p.connection.playwright.status !== 'off' ? h`<div class="conn-line"><span class="conn-dot ${dotCls(p.connection.playwright.status)}"></span><span>Playwright: ${short(p.connection.playwright)}</span></div>` : ''}
       ${commerce && commerce.status !== 'off' ? h`<div class="conn-line"><span class="conn-dot ${dotCls(commerce.status)}"></span><span>Commerce Cloud: ${short(commerce)}</span></div>` : ''}
       <div class="faint conn-meta wrap">v${m.version || ''} · metadata ${p.connection ? p.connection.metadataLabel : ''}</div></div>` : ''}`);
   }
@@ -63,7 +60,7 @@
     const cur = S.project;
     const envFilter = S.envFilter || '';
     envSel.innerHTML = String(h`<option value="">All environments</option>${order.filter((e) => envs.includes(e)).map((e) => h`<option value="${e}" ${e === envFilter ? 'selected' : ''}>${e}</option>`)}`);
-    const list = S.projects.filter((p) => !envFilter || p.environment === envFilter);
+    const list = S.projects;
     $('project-switch').innerHTML = String(h`${list.length ? list.map((p) => h`<option value="${p.id}" ${cur && p.id === cur.id ? 'selected' : ''}>${p.name} · ${p.environment}</option>`) : h`<option value="">No projects yet</option>`}<option value="__new__">+ New project…</option>`);
   }
 

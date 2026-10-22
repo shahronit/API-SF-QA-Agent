@@ -23,6 +23,8 @@ test('connector routing: Salesforce vs Commerce vs frontend HTTP', () => {
   const p = { id: 'P', mode: 'demo', environment: 'QA', integrationConfig: { http: { baseUrl: 'https://api.example.com' }, commerce: { enabled: true } } };
   assert.equal(connectorFor(p, { apiType: 'HTTP', endpoint: '/v1/health' }).kind, 'http');
   assert.equal(connectorFor(p, { apiType: 'OCAPI', endpoint: '/s/x/dw/shop/v24_5/products/a' }).kind, 'demo-commerce');
+  assert.equal(isCommerceRequest({ apiType: 'HTTP', endpoint: '/shopper/auth/v1/organizations/{{organization_id}}/oauth2/token' }), true);
+  assert.equal(connectorFor(p, { apiType: 'HTTP', endpoint: '/shopper/auth/v1/organizations/{{organization_id}}/oauth2/token' }).kind, 'demo-commerce');
 });
 
 test('HttpConnector: absolute URLs run without a configured base URL', () => {

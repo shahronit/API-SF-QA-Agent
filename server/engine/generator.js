@@ -14,10 +14,11 @@ const ai = require('./ai');
 const { apiTypeScenarios } = require('./apitypes');
 const { commerceScenarios, enabled: commerceEnabled } = require('./commerce');
 const { experienceScenarios, experienceEnabled } = require('./experience');
-const { parseAcceptance, applyAcceptance } = require('./acceptance');
+const { parseAcceptance, parseDocRules, applyAcceptance } = require('./acceptance');
 const { loadFixtures, fixtureTests } = require('./org-fixtures');
 const { httpScenarios } = require('./http-scenarios');
 const contracts = require('./contracts');
+const { matchEndpoints, listEndpoints, usesLegacyContract } = require('./endpoints');
 
 const OPS = {
   create: /\b(create|creat(es|ing)|add|insert|new|register|submit|onboard)\b/i,
@@ -466,6 +467,13 @@ function crudScenarios(b, d, analysis, objectFields) {
         title: `Read-only user cannot create ${obj} (CRUD)`, method: 'POST', endpoint: `${v}/sobjects/${obj}`, body: payload, auth: 'lowpriv',
         assertions: [{ type: 'status', op: 'in', expected: [400, 403] }, { type: 'sfError', op: 'eq', expected: 'INSUFFICIENT_ACCESS_OR_READONLY' }], tags: ['authorization', 'record-access'],
       });
+      if ((analysis.operations || []).some((o) => o === 'update' || o === 'upsert')) {
+        const [editField] = Object.keys(payload);
+        b.add(sec, {
+          title: `Read-only user cannot update ${obj} (CRUD)`, method: 'PATCH', endpoint: `${v}/sobjects/${obj}/{{${varId}}}`, body: { [editField]: payload[editField] }, auth: 'lowpriv',
+          assertions: [{ type: 'status', op: 'in', expected: [400, 403] }, { type: 'sfError', op: 'eq', expected: 'INSUFFICIENT_ACCESS_OR_READONLY' }], tags: ['authorization', 'record-access'],
+        });
+      }
     }
     for (const hf of ((lp.hiddenFields || {})[obj] || []).slice(0, 1)) {
       b.add(sec, {
@@ -488,29 +496,52 @@ function crudScenarios(b, d, analysis, objectFields) {
   }
 }
 
+function happyAssertions(e) {
+  const success = e.successStatus && e.successStatus.length ? e.successStatus : [200, 201];
+  const assertions = [{ type: 'status', op: 'in', expected: success }];
+  const legacy = usesLegacyContract(e);
+  const needsId = Boolean(e.object) && (legacy || (e.transformChecks && e.transformChecks.length) || (e.requestMapping && Object.keys(e.requestMapping).length));
+  const idPath = e.idPath || (legacy || needsId ? '$.salesforceId' : '');
+  if (idPath) {
+    assertions.push({ type: 'jsonpath', path: idPath, op: legacy ? 'matches' : 'exists', expected: legacy ? SF_ID_RX : undefined });
+  }
+  if (e.successPath) assertions.push({ type: 'jsonpath', path: e.successPath, op: 'eq', expected: e.successValue === undefined ? 'SUCCESS' : e.successValue });
+  else if (legacy) assertions.push({ type: 'jsonpath', path: '$.status', op: 'eq', expected: 'SUCCESS' });
+  if (e.responseSchema) assertions.push({ type: 'schema', expected: e.responseSchema });
+  return { assertions, idPath, success };
+}
+
 function integrationScenarios(b, analysis) {
-  const endpoints = (b.project.integrationConfig && b.project.integrationConfig.endpoints) || [];
-  const text = words(`${b.story.summary} ${b.story.description} ${b.story.acceptanceCriteria}`);
-  const matched = endpoints.filter((e) => (e.keywords || []).some((k) => text.includes(k.toLowerCase())) || text.includes(String(e.path).toLowerCase()));
+  const endpoints = listEndpoints(b.project);
+  const matched = matchEndpoints(endpoints, b.story);
+  analysis.matchedEndpoints = matched.map((e) => ({ id: e.id, name: e.name, path: e.path, method: e.method }));
   for (const e of matched) {
-    const s = b.scenario(`${e.name} — ${e.direction || 'External System → Middleware → Salesforce'}`, 'Integration', 'Apex REST', e.object, e.description || 'Integration contract, mapping, retry/idempotency, duplicate handling and timeout behaviour.');
+    const apiType = e.kind === 'http' ? 'HTTP' : 'Apex REST';
+    const s = b.scenario(`${e.name} — ${e.direction || 'External System → Middleware → Salesforce'}`, 'Integration', apiType, e.object, e.description || 'Integration contract, mapping, retry/idempotency, duplicate handling and timeout behaviour.');
     const idVar = `${camel(e.object || 'record')}IntegrationId`;
     const sample = e.samplePayload || {};
     const mapping = e.requestMapping || {};
     const sfExpected = Object.fromEntries(Object.entries(mapping).map(([apiField, sfField]) => [sfField, `{{req.${apiField}}}`]));
+    const happy = happyAssertions(e);
+    const extract = happy.idPath ? [{ var: idVar, path: happy.idPath }] : [];
+    const cleanup = e.object && happy.idPath ? { object: e.object, idVar } : undefined;
+    const sfValidation = e.object && Object.keys(mapping).length ? { object: e.object, idVar, expected: sfExpected, mappingCheck: true } : undefined;
     b.add(s, {
-      title: `${e.name}: valid payload is accepted and mapped to ${e.object}`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path, body: sample,
-      assertions: [{ type: 'status', op: 'in', expected: e.successStatus || [200, 201] }, { type: 'jsonpath', path: e.idPath || '$.salesforceId', op: 'matches', expected: SF_ID_RX }, { type: 'jsonpath', path: '$.status', op: 'eq', expected: 'SUCCESS' }],
-      extract: [{ var: idVar, path: e.idPath || '$.salesforceId' }], cleanup: { object: e.object, idVar },
-      sfValidation: { object: e.object, idVar, expected: sfExpected, mappingCheck: true }, tags: ['request-mapping'],
+      title: `${e.name}: valid payload is accepted${e.object ? ` and mapped to ${e.object}` : ''}`, apiType, method: e.method || 'POST', endpoint: e.path, body: sample,
+      assertions: happy.assertions,
+      extract, cleanup, sfValidation, tags: ['request-mapping', e.id],
     });
-    b.add(s, {
-      title: `${e.name}: response contract (status, id, types)`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path, body: e.secondPayload || sample,
-      assertions: [
-        { type: 'status', op: 'in', expected: e.successStatus || [200, 201] },
-        { type: 'schema', expected: e.responseSchema || { type: 'object', required: ['status', 'salesforceId'], properties: { status: { type: 'string', enum: ['SUCCESS', 'ERROR'] }, salesforceId: { type: 'string', pattern: SF_ID_RX } } } },
-      ], tags: ['response-mapping', 'contract'],
-    });
+    const contractAssertions = [{ type: 'status', op: 'in', expected: happy.success }];
+    if (e.responseSchema) contractAssertions.push({ type: 'schema', expected: e.responseSchema });
+    else if (usesLegacyContract(e)) {
+      contractAssertions.push({ type: 'schema', expected: { type: 'object', required: ['status', 'salesforceId'], properties: { status: { type: 'string', enum: ['SUCCESS', 'ERROR'] }, salesforceId: { type: 'string', pattern: SF_ID_RX } } } });
+    }
+    if (contractAssertions.length > 1 || e.responseSchema) {
+      b.add(s, {
+        title: `${e.name}: response contract`, apiType, method: e.method || 'POST', endpoint: e.path, body: e.secondPayload || sample,
+        assertions: contractAssertions, tags: ['response-mapping', 'contract', e.id],
+      });
+    }
     if (e.transformChecks && e.transformChecks.length) {
       b.add(s, {
         title: `${e.name}: data transformation persisted in Salesforce`, apiType: 'REST', method: 'GET', endpoint: `${b.v}/query`,
@@ -520,32 +551,42 @@ function integrationScenarios(b, analysis) {
       });
     }
     if (e.idempotencyHeader) {
+      const retryExtract = happy.idPath ? [{ var: `${idVar}Retry`, path: happy.idPath }] : [];
       b.add(s, {
-        title: `${e.name}: retry with same ${e.idempotencyHeader} is idempotent (first call)`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path,
+        title: `${e.name}: retry with same ${e.idempotencyHeader} is idempotent (first call)`, apiType, method: e.method || 'POST', endpoint: e.path,
         headers: { [e.idempotencyHeader]: 'QA-IDEM-{{runId}}' }, body: e.retryPayload || sample,
-        assertions: [{ type: 'status', op: 'in', expected: [200, 201] }], extract: [{ var: `${idVar}Retry`, path: e.idPath || '$.salesforceId' }], tags: ['retry'],
+        assertions: [{ type: 'status', op: 'in', expected: happy.success }], extract: retryExtract, tags: ['retry', e.id],
       });
+      const retryAssert = [{ type: 'status', op: 'in', expected: happy.success }];
+      if (happy.idPath) retryAssert.push({ type: 'jsonpath', path: happy.idPath, op: 'eq', expected: `{{${idVar}Retry}}` });
       b.add(s, {
-        title: `${e.name}: retry with same ${e.idempotencyHeader} returns the same record`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path,
+        title: `${e.name}: retry with same ${e.idempotencyHeader} returns the same record`, apiType, method: e.method || 'POST', endpoint: e.path,
         headers: { [e.idempotencyHeader]: 'QA-IDEM-{{runId}}' }, body: e.retryPayload || sample,
-        assertions: [{ type: 'status', op: 'in', expected: [200, 201] }, { type: 'jsonpath', path: e.idPath || '$.salesforceId', op: 'eq', expected: `{{${idVar}Retry}}` }], tags: ['retry'],
+        assertions: retryAssert, tags: ['retry', e.id],
       });
     }
-    if (e.duplicateExpect) {
+    if (e.duplicateExpect && e.duplicateExpect.length) {
       b.add(s, {
-        title: `${e.name}: duplicate business key is handled gracefully`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path, body: sample,
-        assertions: [{ type: 'status', op: 'in', expected: e.duplicateExpect }, { type: 'jsonpath', path: '$', op: 'notContains', expected: 'System.' }], tags: ['duplicate-handling'],
+        title: `${e.name}: duplicate business key is handled gracefully`, apiType, method: e.method || 'POST', endpoint: e.path, body: sample,
+        assertions: [{ type: 'status', op: 'in', expected: e.duplicateExpect }, { type: 'jsonpath', path: '$', op: 'notContains', expected: 'System.' }], tags: ['duplicate-handling', e.id],
       });
     }
     if (e.invalidPayload) {
+      const errStatus = e.errorStatus || 400;
+      const errAssert = [{ type: 'status', op: 'eq', expected: errStatus }];
+      if (e.errorPath) errAssert.push({ type: 'jsonpath', path: e.errorPath, op: e.errorValue === undefined ? 'exists' : 'eq', expected: e.errorValue });
+      else if (usesLegacyContract(e)) {
+        errAssert.push({ type: 'jsonpath', path: '$.status', op: 'eq', expected: 'ERROR' });
+        errAssert.push({ type: 'jsonpath', path: '$.message', op: 'exists' });
+      }
       b.add(s, {
-        title: `${e.name}: invalid payload returns a structured error`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path, body: e.invalidPayload,
-        assertions: [{ type: 'status', op: 'eq', expected: 400 }, { type: 'jsonpath', path: '$.status', op: 'eq', expected: 'ERROR' }, { type: 'jsonpath', path: '$.message', op: 'exists' }], tags: ['error-contract'],
+        title: `${e.name}: invalid payload returns a structured error`, apiType, method: e.method || 'POST', endpoint: e.path, body: e.invalidPayload,
+        assertions: errAssert, tags: ['error-contract', e.id],
       });
     }
     b.add(s, {
-      title: `${e.name}: unauthenticated call is rejected`, apiType: 'Apex REST', method: e.method || 'POST', endpoint: e.path, body: sample, auth: 'none',
-      assertions: [{ type: 'status', op: 'in', expected: [401, 403] }], tags: ['authentication'],
+      title: `${e.name}: unauthenticated call is rejected`, apiType, method: e.method || 'POST', endpoint: e.path, body: sample, auth: 'none',
+      assertions: [{ type: 'status', op: 'in', expected: [401, 403] }], tags: ['authentication', e.id],
     });
     if (e.healthPath) {
       b.add(s, {
@@ -555,7 +596,8 @@ function integrationScenarios(b, analysis) {
     }
   }
   if (matched.length === 0 && analysis.integration) {
-    const s = b.scenario('Integration coverage — endpoint not yet configured', 'Integration', 'REST API', analysis.objects[0], 'The story references an integration, but no matching endpoint exists in Project → Integration configuration.');
+    analysis.gaps.push({ label: 'RECOMMENDED', text: 'No matching custom Apex REST / HTTP endpoint. Add it on Project → Other systems, or link endpoints on the story. Experience Cloud and Commerce Cloud paths are not stored here.' });
+    const s = b.scenario('Integration coverage — endpoint not yet configured', 'Integration', 'REST API', analysis.objects[0], 'The story references an integration, but no matching endpoint exists in Project → Other systems.');
     b.add(s, {
       title: 'Partial failure: composite request with one invalid record (allOrNone=false)', apiType: 'Composite', method: 'POST', endpoint: `${b.v}/composite/sobjects`,
       body: { allOrNone: false, records: analysis.objects[0] && analysis.describes[analysis.objects[0]] ? [{ attributes: { type: analysis.objects[0] }, ...buildPayload(analysis.describes[analysis.objects[0]], []) }, { attributes: { type: analysis.objects[0] } }] : [] },
@@ -581,12 +623,47 @@ function integrationScenarios(b, analysis) {
   }
 }
 
+const INPUT_SOURCES = ['jira', 'docs', 'jira+docs'];
+
+function normalizeInputSource(raw) {
+  const s = String(raw || '').toLowerCase().replace(/[\s_]+/g, '');
+  if (['jira', 'ticket', 'tickets', 'jiraticket', 'jiratickets'].includes(s)) return 'jira';
+  if (['docs', 'doc', 'integrationdoc', 'integrationdocs', 'document', 'documents'].includes(s)) return 'docs';
+  if (['jira+docs', 'jiraanddocs', 'both', 'combined', 'ticket+doc', 'ticket+docs', 'jiraticket+integrationdoc'].includes(s)) return 'jira+docs';
+  return null;
+}
+
+function docsText(docs) {
+  return (docs || []).map((d) => `## ${d.name || 'Document'}\n${d.body || ''}`).join('\n\n').trim();
+}
+
+/** Story-shaped view used as generator input for the selected source. story.key is preserved for linking. */
+function storyViewForSource(story, docs, inputSource) {
+  const src = normalizeInputSource(inputSource) || 'jira+docs';
+  const body = docsText(docs);
+  if (src === 'docs') {
+    return {
+      ...story,
+      summary: (docs && docs[0] && docs[0].name) || 'Integration document',
+      description: body,
+      acceptanceCriteria: '',
+    };
+  }
+  if (src === 'jira') return { ...story };
+  return {
+    ...story,
+    description: [story.description || '', body].filter(Boolean).join('\n\n'),
+  };
+}
+
 /**
- * Analyse a story and build a proposed suite.
+ * Analyse a story and/or integration docs and build a proposed suite.
  * @returns {{analysis, scenarios}}
  */
-async function generateSuite({ project, story, sf }) {
-  const text = `${story.summary}\n${story.description || ''}\n${story.acceptanceCriteria || ''}`;
+async function generateSuite({ project, story, sf, docs = [], inputSource = 'jira+docs' }) {
+  const src = normalizeInputSource(inputSource) || 'jira+docs';
+  const view = storyViewForSource(story, docs, src);
+  const text = `${view.summary}\n${view.description || ''}\n${view.acceptanceCriteria || ''}`;
   const label = metadataLabel(project);
   const notes = [];
   let catalog = [];
@@ -594,15 +671,15 @@ async function generateSuite({ project, story, sf }) {
   try {
     catalog = await sf.describeGlobal();
   } catch (e) {
-    notes.push({ label: 'ASSUMED', text: `Salesforce metadata discovery unavailable: ${e.explanation ? e.explanation.title : e.message}. Objects inferred from story text only.` });
+    notes.push({ label: 'ASSUMED', text: `Salesforce metadata discovery unavailable: ${e.explanation ? e.explanation.title : e.message}. Objects inferred from ${src === 'docs' ? 'integration docs' : 'story text'} only.` });
     metadataSource = 'Unavailable — inferred from story text';
   }
   let objects = catalog.length ? detectObjects(text, catalog) : (text.match(/\b([A-Z][A-Za-z]+(__c)?)\b/g) || []).filter((w) => ['Account', 'Contact', 'Lead', 'Opportunity', 'Case'].includes(w) || w.endsWith('__c'));
   objects = [...new Set(objects)];
   // Objects named in the summary are the subject; others mentioned only in the
   // description (e.g. a parent Account) are wired as setup/parents, not suites.
-  if (catalog.length && objects.length > 1) {
-    const inSummary = detectObjects(story.summary, catalog);
+  if (catalog.length && objects.length > 1 && src !== 'docs') {
+    const inSummary = detectObjects(view.summary, catalog);
     if (inSummary.length) objects = objects.filter((o) => inSummary.includes(o));
   }
 
@@ -635,9 +712,9 @@ async function generateSuite({ project, story, sf }) {
   const integration = INTEGRATION.test(text);
   const apiTypes = ['REST API', ...API_HINTS.filter(([, rx]) => rx.test(text)).map(([n]) => n)];
   const detectedTypes = ((project.integrationConfig && project.integrationConfig.salesforceDetection) || {}).types || [];
-  if (detectedTypes.some((t) => /B2C|SFCC|Commerce Cloud/i.test(t)) && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) apiTypes.push('Commerce Cloud');
-  if (detectedTypes.some((t) => /Experience/i.test(t)) && !apiTypes.includes('Experience Cloud')) apiTypes.push('Experience Cloud');
-  if (detectedTypes.some((t) => /B2B/i.test(t)) && !apiTypes.includes('B2B Commerce')) apiTypes.push('B2B Commerce');
+  if (detectedTypes.some((t) => /SFCC/i.test(t) || t === 'B2C Commerce' || t === 'B2C Commerce / SFCC') && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) apiTypes.push('Commerce Cloud');
+  if (detectedTypes.some((t) => /Experience Cloud/i.test(t) || t === 'Experience / B2B Commerce') && !apiTypes.includes('Experience Cloud')) apiTypes.push('Experience Cloud');
+  if (detectedTypes.some((t) => t === 'Experience Cloud B2B' || t === 'Experience / B2B Commerce') && !apiTypes.includes('B2B Commerce')) apiTypes.push('B2B Commerce');
   if (commerceEnabled(project) && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) apiTypes.push('Commerce Cloud');
   if (experienceEnabled(project) && !apiTypes.some((t) => /Experience|B2B Commerce/i.test(t))) apiTypes.push('Experience Cloud');
   if (endpoints.some((e) => (e.keywords || []).some((k) => lower.includes(k.toLowerCase())))) apiTypes.push('Apex REST');
@@ -646,15 +723,34 @@ async function generateSuite({ project, story, sf }) {
     const qf = (project.businessConfig && project.businessConfig.queryTemplates || {})[o];
     if (qf && operations.includes('query')) queryFilters[o] = qf;
   }
-  const ac = acceptanceList(story);
-  const acceptance = parseAcceptance(story);
+  const ac = acceptanceList(view);
+  const acceptance = parseAcceptance(view);
+  // With Jira AC present, the AC wins in parseAcceptance — doc rules would otherwise be ignored.
+  if (src === 'jira+docs' && view.acceptanceCriteria && docs.length) {
+    const seen = new Set(acceptance.map((a) => a.text));
+    for (const r of parseDocRules(docs)) if (!seen.has(r.text)) acceptance.push(r);
+  }
   const gaps = [];
-  if (!ac.length) gaps.push({ label: 'RECOMMENDED', text: 'Story has no acceptance criteria — expected status codes and error behaviour are assumed from Salesforce defaults.' });
+  if (!ac.length) {
+    gaps.push({
+      label: 'RECOMMENDED',
+      text: src === 'docs'
+        ? 'Integration doc has no explicit acceptance criteria — expected status codes and error behaviour are assumed from Salesforce defaults.'
+        : 'Story has no acceptance criteria — expected status codes and error behaviour are assumed from Salesforce defaults.',
+    });
+  }
   if (!/error|invalid|fail|reject/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'Error handling is not specified. Confirm expected error codes/messages for invalid input.' });
   if (!/permission|profile|access|role|security|authori/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'Authorization requirements are not stated. Confirm which users/profiles may perform this operation.' });
   if (integration && !/retry|idempot|duplicate/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'Integration story does not define retry/idempotency or duplicate handling. Tests assume no duplicates and safe retries.' });
   if (integration && !/timeout|sla|latency|response time/i.test(text)) gaps.push({ label: 'RECOMMENDED', text: 'No timeout/SLA defined. Using project SLA of ' + ((project.businessConfig && project.businessConfig.slaMs) || 2000) + ' ms.' });
-  if (!objects.length && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) gaps.push({ label: 'RECOMMENDED', text: 'No Salesforce object could be identified. Name the object (e.g. Contact) in the story or select it manually.' });
+  if (!objects.length && !apiTypes.some((t) => /Commerce Cloud/i.test(t))) {
+    gaps.push({
+      label: 'RECOMMENDED',
+      text: src === 'docs'
+        ? 'No Salesforce object could be identified in the integration doc. Name the object (e.g. Contact) in the document.'
+        : 'No Salesforce object could be identified. Name the object (e.g. Contact) in the story or select it manually.',
+    });
+  }
 
   let fixtures = {};
   try { fixtures = await loadFixtures(sf, objects, describes); } catch { fixtures = {}; }
@@ -668,14 +764,14 @@ async function generateSuite({ project, story, sf }) {
   }
 
   const analysis = {
-    storyKey: story.key, summary: story.summary, objects, operations, integration, apiTypes: [...new Set(apiTypes)],
+    storyKey: story.key, summary: story.summary, inputSource: src, objects, operations, integration, apiTypes: [...new Set(apiTypes)],
     catalogNames: (catalog || []).map((o) => o.name).filter(Boolean),
     fields: objectFields, acceptanceCriteria: ac, acceptance, gaps, notes, metadataSource, metadataLabel: effectiveLabel,
     describes: Object.fromEntries(Object.entries(describes).map(([k, d]) => [k, { name: d.name, label: d.label, keyPrefix: d.keyPrefix, fields: d.fields }])),
     queryFilters, fixtures, commerceCatalog,
   };
 
-  const b = new SuiteBuilder({ project, story, label: effectiveLabel });
+  const b = new SuiteBuilder({ project, story: { ...story, summary: view.summary, description: view.description, acceptanceCriteria: view.acceptanceCriteria }, label: effectiveLabel });
   for (const o of objects.slice(0, 3)) {
     if (!describes[o] || o.endsWith('__e')) continue;
     crudScenarios(b, describes[o], analysis, objectFields);
@@ -698,11 +794,14 @@ async function generateSuite({ project, story, sf }) {
 
   // Optional AI augmentation — only adds RECOMMENDED ideas, never executable "facts".
   if (ai.enabled()) {
-    const ideas = await ai.suggestCoverage(story, analysis, scenarios).catch(() => null);
+    const ideas = await ai.suggestCoverage(view, analysis, scenarios).catch(() => null);
     if (ideas && ideas.length) analysis.aiSuggestions = ideas.map((i) => ({ label: 'RECOMMENDED', text: i }));
   }
   const slim = { ...analysis, describes: Object.fromEntries(Object.entries(analysis.describes).map(([k, d]) => [k, { name: d.name, label: d.label, fieldCount: d.fields.length, requiredFields: d.fields.filter((f) => f.required).map((f) => f.name) }])) };
   return { analysis: slim, scenarios };
 }
 
-module.exports = { generateSuite, buildPayload, sampleValue, detectObjects, detectFields, OPS, recordIdVar };
+module.exports = {
+  generateSuite, buildPayload, sampleValue, detectObjects, detectFields, OPS, recordIdVar,
+  INPUT_SOURCES, normalizeInputSource, storyViewForSource, docsText,
+};

@@ -26,7 +26,7 @@
     },
     /** Prefer a non-production project as the default so nobody lands in Production by accident. */
     defaultProjectId() {
-      const p = this.projects.find((x) => x.environment !== 'Production' && x.mode === 'demo') || this.projects.find((x) => x.environment !== 'Production') || this.projects[0];
+      const p = this.projects.find((x) => x.environment !== 'Production') || this.projects[0];
       return p ? p.id : null;
     },
     async reloadProjects() {

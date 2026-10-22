@@ -72,11 +72,14 @@ test('workflow compute: new project is in progress until stories and tests exist
   };
   repo.insert('projects', p);
   const state = workflow.getState(p);
-  assert.equal(state.steps.find((s) => s.id === 'project').status, 'completed');
-  assert.equal(state.currentStep, 'jira');
+  assert.equal(state.steps.length, 4);
+  assert.equal(state.steps.find((s) => s.id === 'connect').status, 'in_progress');
+  assert.equal(state.currentStep, 'connect');
   workflow.visit(p, 'salesforce');
   const again = workflow.getState(repo.get('projects', p.id));
-  assert.equal(again.currentStep, 'salesforce');
+  assert.equal(again.currentStep, 'connect');
+  workflow.visit(p, 'create');
+  assert.equal(workflow.getState(repo.get('projects', p.id)).currentStep, 'create');
 });
 
 test('demo Postman connector discovers local collections without MCP', async () => {

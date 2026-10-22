@@ -20,14 +20,16 @@ function analyseCore(result, testCase) {
       rootCause: result.error ? result.error.title : 'Test could not run.',
       evidence: result.error ? result.error.evidence || [] : [],
       action: result.error ? result.error.action : 'Fix the upstream failure and re-run.',
+      href: result.error && result.error.href,
+      actionLabel: result.error && result.error.actionLabel,
       confidence: 'high', label: 'VERIFIED', defectCandidate: false,
     };
   }
   if (result.error && result.error.category === 'environment') {
-    return { category: 'Environment / connectivity', rootCause: result.error.title, evidence: result.error.evidence || [], action: result.error.action, confidence: 'high', label: 'VERIFIED', defectCandidate: false };
+    return { category: 'Environment / connectivity', rootCause: result.error.title, evidence: result.error.evidence || [], action: result.error.action, href: result.error.href, actionLabel: result.error.actionLabel, confidence: 'high', label: 'VERIFIED', defectCandidate: false };
   }
   if (result.error && ['configuration', 'authentication'].includes(result.error.category) && !resp.status) {
-    return { category: 'Configuration', rootCause: result.error.title, evidence: result.error.evidence || [], action: result.error.action, confidence: 'high', label: 'VERIFIED', defectCandidate: false };
+    return { category: 'Configuration', rootCause: result.error.title, evidence: result.error.evidence || [], action: result.error.action, href: result.error.href, actionLabel: result.error.actionLabel, confidence: 'high', label: 'VERIFIED', defectCandidate: false };
   }
 
   for (const a of failedAssertions) ev.push(`${a.check} — ${a.message || `actual ${JSON.stringify(a.actual)}`}`);

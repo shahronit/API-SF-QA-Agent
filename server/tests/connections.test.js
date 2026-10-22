@@ -26,6 +26,7 @@ test('isCommerceRequest detects OCAPI/SCAPI paths', () => {
   assert.equal(isCommerceRequest({ apiType: 'OCAPI' }), true);
   assert.equal(isCommerceRequest({ path: '/s/RefArch/dw/shop/v24_5/products/x' }), true);
   assert.equal(isCommerceRequest({ endpoint: '/product/shopper-products/v1/organizations/o/products/x' }), true);
+  assert.equal(isCommerceRequest({ apiType: 'HTTP', endpoint: '/shopper/auth/v1/organizations/{{organization_id}}/oauth2/token' }), true);
   assert.equal(isCommerceRequest({ apiType: 'REST', path: '/services/data/v62.0/limits' }), false);
 });
 

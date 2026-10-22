@@ -120,9 +120,8 @@ class SalesforceConnector {
       headers.Authorization = `Bearer ${t.accessToken}`;
     } else if (auth === 'invalid') {
       headers.Authorization = 'Bearer 00DINVALIDTOKEN!QA.NegativeTest.InvalidToken';
-    } else {
-      delete headers.Authorization;
     }
+    // auth === 'none' (and helper-applied Bearer/Basic) keeps caller Authorization.
     if (!instanceUrl) {
       throw new ConnectorError({
         code: 'SF_INSTANCE_MISSING',

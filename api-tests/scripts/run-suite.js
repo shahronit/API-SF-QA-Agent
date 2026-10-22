@@ -10,6 +10,11 @@
  *   node api-tests/scripts/run-suite.js --project PRJ-001 [--priority P0,P1] [--type Functional,Negative]
  *        [--story DEMO-101] [--tests TC-00001,TC-00002] [--label "Nightly"] [--junit api-tests/reports/junit.xml]
  *        [--allow-failures] [--timeout 1800]
+ *        [--min-pass-rate 95] [--require-p0] [--max-new-failures 0] [--max-blocked 5]
+ *
+ * Quality gate: when any of --min-pass-rate / --require-p0 / --max-new-failures / --max-blocked is
+ * given, the exit code follows GET /api/runs/:id/gate instead of "any failure fails the build".
+ * --max-new-failures compares against the previous run that shares tests with this one.
  *
  * Env: QA_PLATFORM_URL (default http://127.0.0.1:4317), QA_PLATFORM_USER (audit identity, default ci-pipeline)
  *
@@ -96,6 +101,15 @@ async function main() {
   fs.writeFileSync(summaryFile, JSON.stringify({ run: { id: run.id, status: run.status, environment: run.environment, total: run.total, passed: run.passed, failed: run.failed, blocked: run.blocked, skipped: run.skipped, avgResponseMs: run.avgResponseMs }, failures: results.filter((r) => r.status === 'failed').map((r) => ({ testCaseId: r.testCaseId, title: r.title, endpoint: `${r.method} ${r.endpoint}`, statusCode: r.statusCode, reason: r.reason, correlationId: r.correlationId })) }, null, 2));
   console.log(`  JUnit: ${outFile}\n  Summary: ${summaryFile}\n  Report: ${BASE}/api/reports/${run.id}?format=html`);
   for (const r of results.filter((x) => x.status === 'failed')) console.log(`  ✖ ${r.testCaseId} ${r.title} — ${r.reason || `HTTP ${r.statusCode}`}`);
+  const gateArgs = { minPassRate: args['min-pass-rate'], requireP0: args['require-p0'] ? 'true' : 'false', maxNewFailures: args['max-new-failures'], maxBlocked: args['max-blocked'] };
+  if (gateArgs.minPassRate !== undefined || args['require-p0'] || gateArgs.maxNewFailures !== undefined || gateArgs.maxBlocked !== undefined) {
+    const qs = new URLSearchParams(Object.entries(gateArgs).filter(([, v]) => v !== undefined && v !== true).map(([k, v]) => [k, String(v)]));
+    const gate = await call('GET', `/api/runs/${run.id}/gate?${qs}`);
+    for (const c of gate.checks) console.log(`  ${c.ok ? '✔' : '✖'} gate ${c.name}: ${c.detail}`);
+    if (!gate.passed && !args['allow-failures']) { console.error('✖ Quality gate failed.'); process.exit(1); }
+    console.log(gate.passed ? '✔ Quality gate passed.' : '⚠ Quality gate failed, but failures are allowed (--allow-failures).');
+    return;
+  }
   if ((run.failed || run.status === 'error') && !args['allow-failures']) process.exit(1);
   console.log(run.failed ? '⚠ Failures allowed (--allow-failures).' : '✔ All executed tests passed.');
 }

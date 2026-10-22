@@ -12,7 +12,7 @@
       QA.router.setCrumbs([{ label: 'Dashboard' }]);
       const S = QA.state;
       const f = {
-        scope: ctx.query.scope || 'project', range: ctx.query.range ?? '14',
+        scope: ctx.query.scope || 'all', range: ctx.query.range ?? '14',
         environment: ctx.query.environment || '', apiType: ctx.query.apiType || '', testType: ctx.query.testType || '', priority: ctx.query.priority || '', sprint: ctx.query.sprint || '',
         sfOrg: ctx.query.sfOrg || '', jiraProject: ctx.query.jiraProject || '', status: ctx.query.status || '',
       };

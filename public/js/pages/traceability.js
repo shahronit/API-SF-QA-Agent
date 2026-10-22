@@ -1,7 +1,7 @@
 /* Traceability (story → scenario → case → execution → result → defect) and regression impact. */
 (() => {
   const QA = window.QA;
-  const { h, ic, fmt, badge, prov, pri, method, on, errorBox, loading, empty, toast, toastError, withBusy, esc } = QA.ui;
+  const { h, ic, fmt, badge, prov, pri, method, on, errorBox, loading, empty, withBusy } = QA.ui;
   const C = QA.components;
   const api = QA.api;
 

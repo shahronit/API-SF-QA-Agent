@@ -9,6 +9,128 @@ const SECRET_KEYS = /^(accessToken|refreshToken|clientSecret|sfdxAuthUrl|passwor
 const SFCC_HOST = /(^|\.)demandware\.(net|com)$|(^|\.)commercecloud\.salesforce\.com$|^account(-pod\d+)?\.demandware\.com$/i;
 const CORE_HOST = /(^|\.)(salesforce|force|cloudforce|salesforce-setup|salesforce-sites)\.com$/i;
 
+const TYPE_CORE = 'Salesforce Core';
+const TYPE_EXPERIENCE_B2B = 'Experience Cloud B2B';
+const TYPE_EXPERIENCE_B2C = 'Experience Cloud B2C';
+const TYPE_SFCC_B2B = 'SFCC B2B';
+const TYPE_SFCC_B2C = 'SFCC B2C';
+
+const ORG_KIND = {
+  CORE: 'core',
+  EXPERIENCE_B2B: 'experience-b2b',
+  EXPERIENCE_B2C: 'experience-b2c',
+  SFCC_B2B: 'sfcc-b2b',
+  SFCC_B2C: 'sfcc-b2c',
+  HTTP: 'http',
+};
+const SPECIFIC_ORG_KINDS = new Set([
+  ORG_KIND.EXPERIENCE_B2B, ORG_KIND.EXPERIENCE_B2C, ORG_KIND.SFCC_B2B, ORG_KIND.SFCC_B2C,
+]);
+
+const TYPE_ALIASES = {
+  'Experience / B2B Commerce': TYPE_EXPERIENCE_B2B,
+  'Experience Cloud': TYPE_EXPERIENCE_B2C,
+  'B2C Commerce': TYPE_SFCC_B2C,
+  SFCC: TYPE_SFCC_B2C,
+  'B2C Commerce / SFCC': TYPE_SFCC_B2C,
+};
+
+function normalizeTypeLabels(types) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of types || []) {
+    const t = TYPE_ALIASES[raw] || raw;
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+function inferChannelFromText(blob, { defaultChannel } = {}) {
+  const t = String(blob || '').toLowerCase();
+  const b2b = /\bb2b\b/.test(t);
+  const b2c = /\bb2c\b|\bd2c\b/.test(t);
+  if (b2b && !b2c) return 'b2b';
+  if (b2c && !b2b) return 'b2c';
+  if (b2b && b2c) {
+    if (/experience\s*(cloud\s*)?b2b|\bb2b\s*commerce\b|\bsfcc\s*b2b\b/.test(t)) return 'b2b';
+    if (/experience\s*(cloud\s*)?b2c|\bsfcc\s*b2c\b|\bb2c\s*commerce\b/.test(t)) return 'b2c';
+  }
+  return defaultChannel || null;
+}
+
+function inferSfccChannel({ host, name, siteId, blob } = {}) {
+  return inferChannelFromText(`${name || ''} ${host || ''} ${siteId || ''} ${blob || ''}`, { defaultChannel: 'b2c' });
+}
+
+function typeForOrgKind(kind) {
+  switch (kind) {
+    case ORG_KIND.EXPERIENCE_B2B: return TYPE_EXPERIENCE_B2B;
+    case ORG_KIND.EXPERIENCE_B2C: return TYPE_EXPERIENCE_B2C;
+    case ORG_KIND.SFCC_B2B: return TYPE_SFCC_B2B;
+    case ORG_KIND.SFCC_B2C: return TYPE_SFCC_B2C;
+    case ORG_KIND.CORE: return TYPE_CORE;
+    default: return null;
+  }
+}
+
+function typesForOrgKind(kind) {
+  const t = typeForOrgKind(kind);
+  if (!t) return [];
+  if (String(kind).startsWith('experience')) return [TYPE_CORE, t];
+  return [t];
+}
+
+function orgKindFromTypes(types, loginKind) {
+  const t = normalizeTypeLabels(types);
+  if (t.includes(TYPE_EXPERIENCE_B2B)) return ORG_KIND.EXPERIENCE_B2B;
+  if (t.includes(TYPE_EXPERIENCE_B2C)) return ORG_KIND.EXPERIENCE_B2C;
+  if (t.includes(TYPE_SFCC_B2B)) return ORG_KIND.SFCC_B2B;
+  if (t.includes(TYPE_SFCC_B2C)) return ORG_KIND.SFCC_B2C;
+  if (loginKind === 'sfcc') return ORG_KIND.SFCC_B2C;
+  if (t.includes(TYPE_CORE)) return ORG_KIND.CORE;
+  return null;
+}
+
+function kindsFromTypes(types, loginKind) {
+  const t = normalizeTypeLabels(types);
+  const kinds = [];
+  if (t.includes(TYPE_EXPERIENCE_B2B)) kinds.push(ORG_KIND.EXPERIENCE_B2B);
+  if (t.includes(TYPE_EXPERIENCE_B2C)) kinds.push(ORG_KIND.EXPERIENCE_B2C);
+  if (t.includes(TYPE_SFCC_B2B)) kinds.push(ORG_KIND.SFCC_B2B);
+  if (t.includes(TYPE_SFCC_B2C)) kinds.push(ORG_KIND.SFCC_B2C);
+  if (loginKind === 'sfcc' && !kinds.some((k) => k.startsWith('sfcc'))) kinds.push(ORG_KIND.SFCC_B2C);
+  if (!kinds.length && t.includes(TYPE_CORE)) kinds.push(ORG_KIND.CORE);
+  return kinds;
+}
+
+function familyOf(kind) {
+  if (!kind) return null;
+  if (String(kind).startsWith('experience')) return 'experience';
+  if (String(kind).startsWith('sfcc')) return 'sfcc';
+  return kind;
+}
+
+function kindsCompatible(a, b) {
+  if (!a || !b) return true;
+  if (a === b) return true;
+  if (a === ORG_KIND.HTTP || b === ORG_KIND.HTTP) return true;
+  if (a === ORG_KIND.CORE && familyOf(b) === 'experience') return true;
+  if (b === ORG_KIND.CORE && familyOf(a) === 'experience') return true;
+  return false;
+}
+
+function isExperienceType(t) {
+  const n = TYPE_ALIASES[t] || t;
+  return n === TYPE_EXPERIENCE_B2B || n === TYPE_EXPERIENCE_B2C;
+}
+
+function isSfccType(t) {
+  const n = TYPE_ALIASES[t] || t;
+  return n === TYPE_SFCC_B2B || n === TYPE_SFCC_B2C;
+}
+
 function maskUsername(u) {
   if (!u || typeof u !== 'string') return null;
   const at = u.indexOf('@');
@@ -48,7 +170,8 @@ function classifyLoginUrl(input) {
       host,
       loginUrl,
       accountManager: 'https://account.demandware.com',
-      types: ['B2C Commerce / SFCC'],
+      types: [inferSfccChannel({ host }) === 'b2b' ? TYPE_SFCC_B2B : TYPE_SFCC_B2C],
+      orgKind: inferSfccChannel({ host }) === 'b2b' ? ORG_KIND.SFCC_B2B : ORG_KIND.SFCC_B2C,
     };
   }
 
@@ -74,6 +197,21 @@ function classifyLoginUrl(input) {
 function normalizeLoginUrl(input) {
   const c = classifyLoginUrl(input);
   return c.origin || '';
+}
+
+/**
+ * Origin only when the host is a definite Salesforce Core / Experience or
+ * SFCC host. Template values and ordinary HTTP origins must not be persisted
+ * as `instanceUrl`.
+ */
+function salesforceLoginOrigin(input) {
+  const raw = String(input || '').trim();
+  if (!raw || /\{\{/.test(raw)) return '';
+  const c = classifyLoginUrl(raw);
+  if (!c.origin || !/^https:\/\//i.test(c.origin)) return '';
+  if (c.kind === 'sfcc') return c.origin;
+  if (c.kind === 'core' && !c.ambiguous) return c.origin;
+  return '';
 }
 
 /** Verified `sf org login web` flags: --instance-url / -r, --alias / -a. Do not invent flags. */
@@ -144,7 +282,8 @@ function publicDetection(det) {
     edition: det.edition || null,
     apiVersion: det.apiVersion || null,
     isSandbox: det.isSandbox,
-    types: Array.isArray(det.types) ? det.types.slice() : [],
+    types: normalizeTypeLabels(Array.isArray(det.types) ? det.types : []),
+    orgKind: det.orgKind || orgKindFromTypes(det.types, det.loginKind) || null,
     products: Array.isArray(det.products) ? det.products.slice(0, 40) : [],
     sites: Array.isArray(det.sites) ? det.sites.slice(0, 40) : [],
     stores: Array.isArray(det.stores) ? det.stores.slice(0, 40) : [],
@@ -153,11 +292,6 @@ function publicDetection(det) {
     detectedAt: det.detectedAt || null,
   };
 }
-
-const TYPE_CORE = 'Salesforce Core';
-const TYPE_EXPERIENCE_B2B = 'Experience / B2B Commerce';
-const TYPE_B2C = 'B2C Commerce';
-const TYPE_SFCC = 'SFCC';
 
 const LOGIN_HOST = /^(login|test|test\d*|cs\d+)\.salesforce\.com$/i;
 const REST_RESOURCE = /^(sobjects|query|queryAll|composite|connect|commerce|graphql|jobs|tooling|limits|recent|search|parameterizedSearch|ui-api|wave|actions|appMenu|tabs|theme|support|process|emailConnect|knowledgeManagement)\b/i;
@@ -229,7 +363,10 @@ function normalizeSalesforcePath(endpoint) {
 }
 
 module.exports = {
-  classifyLoginUrl, normalizeLoginUrl, loginPlan, sanitizeOrgDisplay, publicDetection,
+  classifyLoginUrl, normalizeLoginUrl, salesforceLoginOrigin, loginPlan, sanitizeOrgDisplay, publicDetection,
   maskUsername, restApiOrigin, loginOauthOrigin, toRestPath, ensureSalesforceRestPath, normalizeSalesforcePath,
-  TYPE_CORE, TYPE_EXPERIENCE_B2B, TYPE_B2C, TYPE_SFCC,
+  TYPE_CORE, TYPE_EXPERIENCE_B2B, TYPE_EXPERIENCE_B2C, TYPE_SFCC_B2B, TYPE_SFCC_B2C,
+  ORG_KIND, SPECIFIC_ORG_KINDS, normalizeTypeLabels, inferChannelFromText, inferSfccChannel,
+  typeForOrgKind, typesForOrgKind, orgKindFromTypes, kindsFromTypes, familyOf, kindsCompatible,
+  isExperienceType, isSfccType,
 };

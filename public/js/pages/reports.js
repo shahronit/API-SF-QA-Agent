@@ -1,7 +1,7 @@
 /* Reports: per-execution QA report preview and export (PDF, Excel, CSV, HTML). */
 (() => {
   const QA = window.QA;
-  const { h, raw, ic, fmt, badge, prov, on, errorBox, loading, empty, toastError, withBusy } = QA.ui;
+  const { h, ic, fmt, badge, prov, on, errorBox, loading, empty, toastError, withBusy } = QA.ui;
   const C = QA.components;
   const api = QA.api;
 

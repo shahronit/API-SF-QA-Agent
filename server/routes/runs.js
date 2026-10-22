@@ -1,7 +1,7 @@
 'use strict';
 /** Test execution: start/stop runs, stream progress (SSE), results, analysis, explorer. */
 const { route, HttpError, sse } = require('../http');
-const { repo, all, get, now, audit, nextId, decode } = require('../db');
+const { repo, all, get, audit, decode } = require('../db');
 const { connectorFor, isCommerceRequest, isHttpRequest } = require('../connectors');
 const runner = require('../engine/runner');
 const { checkOperation, isProduction, PRODUCTION_WARNING } = require('../engine/safety');
@@ -11,7 +11,7 @@ const { interpolate } = require('../lib/template');
 const { maskDeep, maskHeaders } = require('../lib/mask');
 const { explainResponse } = require('../lib/errors');
 const { prioritise } = require('../engine/priority');
-const ai = require('../engine/ai');
+const { compareRuns, flakyTests, qualityGate } = require('../engine/run-compare');
 const { projectFrom, getProject, paginate, inFilter, likeFilter, dateRange } = require('./util');
 
 function selectTests(p, body) {
@@ -49,6 +49,14 @@ function withDependencies(p, tests) {
   return [...selected.values()].sort((a, b) => a.seq - b.seq);
 }
 
+/** Traceability of the latest approved proposal for the run's story (single-story runs only). */
+function traceabilityFor(p, tests) {
+  const keys = [...new Set(tests.map((t) => t.storyKey).filter(Boolean))];
+  if (keys.length !== 1) return null;
+  const [pr] = repo.find('proposals', "projectId = $p AND storyKey = $k AND status = 'approved'", { p: p.id, k: keys[0] }, 'ORDER BY decidedAt DESC LIMIT 1');
+  return (pr && pr.analysis && pr.analysis.traceability) || null;
+}
+
 route('POST', '/api/runs', (ctx) => {
   const p = projectFrom(ctx);
   const b = ctx.body;
@@ -80,7 +88,18 @@ route('POST', '/api/runs', (ctx) => {
     if (!tests.length) throw new HttpError(400, 'All selected tests modify data; nothing left to run in read-only mode.');
     audit('safety', b.confirmProductionWrites ? 'production.writes-confirmed' : 'production.read-only-run', { user: ctx.user, projectId: p.id, detail: { tests: tests.length, deletesConfirmed: Boolean(b.confirmDelete) } });
   }
-  const run = runner.startRun({ project: p, testCases: tests, user: ctx.user, options: { confirmProductionWrites: b.confirmProductionWrites, confirmDelete: b.confirmDelete, label: b.label, trigger: b.mode === 'failed' ? 'rerun-failed' : b.trigger || 'manual', filter: b.filter } });
+  const executor = ['playwright', 'postman', 'platform'].includes(String(b.executor || '').toLowerCase()) ? String(b.executor).toLowerCase() : 'auto';
+  const storyKeys = [].concat((b.filter && b.filter.storyKey) || b.storyKeys || []).filter(Boolean);
+  const run = runner.startRun({
+    project: p, testCases: tests, user: ctx.user,
+    options: {
+      confirmProductionWrites: b.confirmProductionWrites, confirmDelete: b.confirmDelete, label: b.label,
+      trigger: b.mode === 'failed' ? 'rerun-failed' : b.trigger || 'manual', filter: b.filter, executor,
+      postResultToJira: Boolean(b.postResultToJira),
+      storyKeys,
+      traceability: traceabilityFor(p, tests),
+    },
+  });
   return { ...run, testCaseIds: undefined };
 });
 
@@ -98,6 +117,26 @@ route('GET', '/api/runs/:id', (ctx) => {
   const r = repo.get('runs', ctx.params.id);
   if (!r) throw new HttpError(404, `Execution ${ctx.params.id} not found.`);
   return { ...r, active: runner.isActive(r.id), jiraActivity: all("SELECT ts, user, action, detail FROM audit_log WHERE category = 'jira' AND detail LIKE $r ORDER BY ts", { r: `%${r.id}%` }).map((x) => decode('audit_log', x)) };
+});
+
+route('GET', '/api/runs/:id/compare', (ctx) => {
+  const cmp = compareRuns(ctx.params.id, ctx.query.baseline);
+  if (!cmp) throw new HttpError(404, `Execution ${ctx.params.id} not found.`);
+  if (ctx.query.baseline && ctx.query.baseline !== 'previous' && !cmp.baseline) throw new HttpError(404, `Baseline execution ${ctx.query.baseline} not found.`);
+  const ids = new Set(all('SELECT testCaseId FROM run_results WHERE runId = $r', { r: ctx.params.id }).map((x) => x.testCaseId));
+  return { ...cmp, flaky: flakyTests(repo.get('runs', ctx.params.id).projectId, { testCaseIds: ids }) };
+});
+
+route('GET', '/api/runs/:id/gate', (ctx) => {
+  const q = ctx.query;
+  const gate = qualityGate(ctx.params.id, { minPassRate: q.minPassRate, requireP0: q.requireP0, maxBlocked: q.maxBlocked, maxNewFailures: q.maxNewFailures, baseline: q.baseline });
+  if (!gate) throw new HttpError(404, `Execution ${ctx.params.id} not found.`);
+  return gate;
+});
+
+route('GET', '/api/flaky', (ctx) => {
+  const p = projectFrom(ctx);
+  return { projectId: p.id, window: Number(ctx.query.window) || 5, items: flakyTests(p.id, { window: ctx.query.window }) };
 });
 
 route('GET', '/api/runs/:id/results', (ctx) => {
@@ -156,56 +195,12 @@ route('GET', '/api/results/:id', (ctx) => {
 // ── API Explorer ──
 route('POST', '/api/explorer/execute', async (ctx) => {
   const p = projectFrom(ctx);
-  const b = ctx.body;
-  const method = String(b.method || 'GET').toUpperCase();
-  if (!b.path) throw new HttpError(400, 'Endpoint path is required.', { action: 'Enter a path such as /services/data/v{{apiVersion}}/limits' });
-  const safety = checkOperation(p, { method, path: b.path, body: b.body }, { confirmProductionWrites: b.confirmProductionWrites, confirmDelete: b.confirmDelete });
-  if (safety) throw new HttpError(409, safety.title, safety);
-  const sf = connectorFor(p, { apiType: b.apiType, path: b.path });
-  if (!sf.available) throw new HttpError(503, sf.unavailableExplanation().title, sf.unavailableExplanation());
-  const cc = (p.integrationConfig && p.integrationConfig.commerce) || {};
-  const httpCfg = (p.integrationConfig && p.integrationConfig.http) || {};
-  const { restApiOrigin, ensureSalesforceRestPath } = require('../connectors/salesforce-org');
-  const vars = {
-    apiVersion: p.apiVersion, runId: 'explorer',
-    instanceUrl: restApiOrigin(p.instanceUrl) || p.instanceUrl || '',
-    ccSiteId: cc.siteId || (p.mode === 'demo' ? 'RefArch' : ''),
-    ccOrgId: cc.orgId || '', ccShortCode: cc.shortCode || '',
-    ocapiVersion: cc.ocapiVersion || 'v24_5',
-    httpBaseUrl: String(httpCfg.baseUrl || '').replace(/\/$/, ''),
-    ...((p.testDataConfig || {}).variables || {}), ...(b.variables || {}),
-  };
-  if (vars.siteId && !/^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(String(vars.siteId))) {
-    vars.ccSiteId = vars.ccSiteId || vars.siteId;
-    delete vars.siteId;
-  }
-  const missing = new Set();
-  let path = interpolate(b.path, vars, missing);
-  if (!isCommerceRequest({ apiType: b.apiType, path }) && !isHttpRequest({ apiType: b.apiType, path })) {
-    path = ensureSalesforceRestPath(path, p.apiVersion);
-  }
-  let body; let bodyRaw;
-  if (typeof b.body === 'string' && b.body.trim()) {
-    const text = interpolate(b.body, vars, missing);
-    if (b.apiType === 'SOAP' || b.rawBody) bodyRaw = text; else { try { body = JSON.parse(text); } catch { bodyRaw = text; } }
-  } else if (b.body && typeof b.body === 'object') body = interpolate(b.body, vars, missing);
-  const headers = interpolate(b.headers || {}, vars, missing);
-  if (Object.keys(headers).some((h) => /^authorization$/i.test(h))) throw new HttpError(400, 'Remove the Authorization header — authentication is injected from the secret store.', { action: 'Choose an Auth mode instead.' });
-  const query = interpolate(b.query || {}, vars, missing);
-  const unresolved = [...missing].filter((m) => !m.startsWith('$') && m !== 'sessionId');
-  if (unresolved.length) throw new HttpError(400, `Unresolved variable(s): ${unresolved.map((v) => `{{${v}}}`).join(', ')}.`, { action: 'Provide values in the Variables panel.' });
+  const lab = require('../engine/http-lab');
   try {
-    const res = await sf.request({ method, path, headers, query, body, bodyRaw, auth: b.auth || 'default', apiType: b.apiType });
-    const assertions = b.assertions && b.assertions.length ? evaluate(interpolate(b.assertions, vars, new Set()), res) : [];
-    audit('explorer', 'request.executed', { user: ctx.user, projectId: p.id, detail: { method, path: path.split('?')[0], status: res.status, ms: res.timeMs } });
-    return {
-      request: { method, url: res.url, headers: maskHeaders(res.requestHeaders || headers), body: maskDeep(body !== undefined ? body : bodyRaw) },
-      response: { status: res.status, headers: maskHeaders(res.headers), body: maskDeep(res.body), timeMs: res.timeMs, sizeBytes: res.sizeBytes, correlationId: res.correlationId },
-      assertions, explanation: explainResponse({ status: res.status, body: res.body, method, url: res.url }),
-      demo: p.mode === 'demo',
-    };
+    return await lab.execute(p, ctx.body || {}, ctx.user);
   } catch (e) {
-    throw new HttpError(502, e.explanation ? e.explanation.title : e.message, e.explanation || {});
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(e.status || 502, e.message || (e.explanation && e.explanation.title) || 'Request failed', e.info || e.explanation || {});
   }
 });
 
@@ -238,7 +233,14 @@ route('POST', '/api/explorer/generate-test', (ctx) => {
 
 route('GET', '/api/explorer/templates', (ctx) => {
   const v = '/services/data/v{{apiVersion}}';
+  const { explorerTemplates } = require('../engine/endpoints');
+  const { getProject } = require('./util');
+  let projectOverlay = [];
+  if (ctx.query.projectId) {
+    try { projectOverlay = explorerTemplates(getProject(ctx.query.projectId)); } catch { projectOverlay = []; }
+  }
   return [
+    ...projectOverlay,
     { group: 'REST API', name: 'API versions', method: 'GET', path: '/services/data' },
     { group: 'REST API', name: 'Org limits', method: 'GET', path: `${v}/limits` },
     { group: 'REST API', name: 'Describe global', method: 'GET', path: `${v}/sobjects` },

@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS test_data (
 CREATE TABLE IF NOT EXISTS saved_requests (
   id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL, collection TEXT, apiType TEXT, method TEXT, path TEXT,
-  headers TEXT, query TEXT, body TEXT, auth TEXT, createdAt TEXT NOT NULL
+  headers TEXT, query TEXT, body TEXT, auth TEXT, extra TEXT, createdAt TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS contracts (
@@ -142,20 +142,62 @@ CREATE TABLE IF NOT EXISTS context_docs (
   name TEXT NOT NULL, body TEXT, filePath TEXT,
   createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS http_environments (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, envValues TEXT, isActive INTEGER NOT NULL DEFAULT 0,
+  createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS http_cookies (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  domain TEXT NOT NULL, path TEXT NOT NULL DEFAULT '/',
+  name TEXT NOT NULL, value TEXT NOT NULL,
+  expires TEXT, httpOnly INTEGER NOT NULL DEFAULT 0,
+  secure INTEGER NOT NULL DEFAULT 0, sameSite TEXT,
+  createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_cookies_project ON http_cookies(projectId, domain);
+
+CREATE TABLE IF NOT EXISTS request_history (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  method TEXT, url TEXT, status INTEGER, timeMs INTEGER, sizeBytes INTEGER,
+  request TEXT, response TEXT, tests TEXT, console TEXT, createdAt TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_history_project ON request_history(projectId, createdAt);
+
+CREATE TABLE IF NOT EXISTS console_logs (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  level TEXT, source TEXT, message TEXT, detail TEXT, createdAt TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_console_project ON console_logs(projectId, createdAt);
+
+CREATE TABLE IF NOT EXISTS mock_servers (
+  id TEXT PRIMARY KEY, projectId TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, port INTEGER, status TEXT NOT NULL DEFAULT 'stopped',
+  collectionId TEXT, examples TEXT, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+);
 `;
 db.exec(SCHEMA);
+try { db.exec('ALTER TABLE stories ADD COLUMN endpointIds TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE saved_requests ADD COLUMN extra TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE test_cases ADD COLUMN extra TEXT'); } catch { /* already present */ }
 
 const JSON_FIELDS = {
   projects: ['testDataConfig', 'integrationConfig', 'notificationConfig', 'businessConfig'],
-  stories: ['components', 'labels'],
+  stories: ['components', 'labels', 'endpointIds'],
   proposals: ['analysis', 'scenarios', 'decision'],
   scenarios: ['priorityReason'],
-  test_cases: ['headers', 'query', 'body', 'assertions', 'extract', 'sfValidation', 'contractRef', 'cleanup', 'tags', 'priorityReason'],
+  test_cases: ['headers', 'query', 'body', 'assertions', 'extract', 'sfValidation', 'contractRef', 'cleanup', 'tags', 'priorityReason', 'extra'],
   runs: ['options', 'jiraActivity', 'summary', 'createdRecords'],
   run_results: ['request', 'response', 'assertions', 'sfValidation', 'contract', 'error', 'analysis'],
   defects: ['labels', 'components'],
   test_data: ['payload'],
-  saved_requests: ['headers', 'query', 'body'],
+  saved_requests: ['headers', 'query', 'body', 'extra'],
+  http_environments: ['envValues'],
+  request_history: ['request', 'response', 'tests', 'console'],
+  console_logs: ['detail'],
+  mock_servers: ['examples'],
   contracts: ['spec'],
   demo_jira: ['labels', 'components', 'comments', 'links'],
   audit_log: ['detail'],

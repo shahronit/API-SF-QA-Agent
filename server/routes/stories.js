@@ -4,8 +4,10 @@ const crypto = require('node:crypto');
 const { route, HttpError, required } = require('../http');
 const { repo, all, get, now, audit, nextId, transaction } = require('../db');
 const { salesforceFor, jiraFor, postmanFor } = require('../connectors');
-const { generateProposedSuite } = require('../engine/cli-generator');
+const { generateProposedSuite, openapiSummaries, normalizeInputSource, INPUT_SOURCES } = require('../engine/cli-generator');
 const { classifyStory } = require('../engine/classifier');
+const { checkOperation, isProduction, PRODUCTION_WARNING } = require('../engine/safety');
+const runner = require('../engine/runner');
 const { projectFrom, getProject, paginate, likeFilter, inFilter } = require('./util');
 
 function upsertStory(projectId, s, source) {
@@ -13,7 +15,9 @@ function upsertStory(projectId, s, source) {
   const row = {
     projectId, key: s.key, summary: s.summary || '(no summary)', description: s.description || '', acceptanceCriteria: s.acceptanceCriteria || '',
     issueType: s.issueType || 'Story', status: s.status || null, priority: s.priority || null, sprint: s.sprint || null,
-    components: s.components || [], labels: s.labels || [], assignee: s.assignee || null, url: s.url || null, source, syncedAt: now(),
+    components: s.components || [], labels: s.labels || [],
+    endpointIds: s.endpointIds || (existing && existing.endpointIds) || [],
+    assignee: s.assignee || null, url: s.url || null, source, syncedAt: now(),
   };
   if (existing) { repo.update('stories', existing.id, row); return { ...existing, ...row }; }
   const r = { id: crypto.randomUUID(), ...row };
@@ -64,6 +68,20 @@ route('POST', '/api/stories', (ctx) => {
   return s;
 });
 
+route('PATCH', '/api/stories/:key', (ctx) => {
+  const p = projectFrom(ctx);
+  const s = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: ctx.params.key });
+  if (!s) throw new HttpError(404, `Story ${ctx.params.key} is not on this project.`);
+  const patch = {};
+  if (Array.isArray(ctx.body && ctx.body.endpointIds)) {
+    patch.endpointIds = ctx.body.endpointIds.map(String).filter((id) => /^EP-/i.test(id)).slice(0, 40);
+  }
+  if (!Object.keys(patch).length) throw new HttpError(400, 'Nothing to update. Send endpointIds.');
+  repo.update('stories', s.id, patch);
+  audit('jira', 'story.updated', { user: ctx.user, projectId: p.id, detail: { key: s.key, ...patch } });
+  return { ...s, ...patch };
+});
+
 route('GET', '/api/stories/:key', async (ctx) => {
   const p = projectFrom(ctx);
   let s = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: ctx.params.key });
@@ -83,32 +101,174 @@ route('GET', '/api/stories/:key', async (ctx) => {
   return { ...s, scenarios, tests, defects, proposals, coverage: storyCoverage(p.id)[s.key] || null, classification: classifyStory(s) };
 });
 
+function loadStoryDocs(p, docIds, { includeAllIfEmpty = false } = {}) {
+  let docs = repo.find('context_docs', 'projectId = $p', { p: p.id }, 'ORDER BY updatedAt DESC');
+  if (Array.isArray(docIds) && docIds.length) {
+    const want = new Set(docIds.map(String));
+    docs = docs.filter((d) => want.has(String(d.id)));
+  } else if (!includeAllIfEmpty) {
+    return [];
+  }
+  return docs;
+}
+
+function ensureDocStory(p, docs) {
+  const names = (docs || []).map((d) => d.name).filter(Boolean).join(', ');
+  return upsertStory(p.id, {
+    key: 'DOC',
+    summary: names ? `Integration docs: ${names.slice(0, 180)}` : 'Integration documentation',
+    description: (docs || []).map((d) => `## ${d.name}\n${d.body || ''}`).join('\n\n').slice(0, 20000),
+    acceptanceCriteria: '',
+    issueType: 'Document',
+    status: 'To Do',
+  }, 'docs');
+}
+
+function resolveInputSource(raw, { hasDocs }) {
+  const src = normalizeInputSource(raw);
+  if (src) return src;
+  return hasDocs ? 'jira+docs' : 'jira';
+}
+
+const STORY_KEY_RE = /^[A-Z][A-Z0-9_]+-\d+$/;
+
+function requestedStoryKeys(body = {}) {
+  const out = [];
+  const add = (value) => {
+    if (value == null || value === false || value === true) return;
+    if (Array.isArray(value)) { value.forEach(add); return; }
+    String(value).split(/[\s,]+/).forEach((part) => {
+      const key = part.trim().toUpperCase();
+      if (STORY_KEY_RE.test(key)) out.push(key);
+    });
+  };
+  add(body.storyKey);
+  add(body.issueKey);
+  add(body.keys);
+  add(body.storyKeys);
+  return [...new Set(out)];
+}
+
+function deleteStoryGenerated(p, storyKey) {
+  const tests = repo.find('test_cases', 'projectId = $p AND storyKey = $k', { p: p.id, k: storyKey });
+  const scenarios = repo.find('scenarios', 'projectId = $p AND storyKey = $k', { p: p.id, k: storyKey });
+  tests.forEach((t) => repo.remove('test_cases', t.id));
+  scenarios.forEach((s) => repo.remove('scenarios', s.id));
+  return { tests: tests.length, scenarios: scenarios.length, ids: tests.map((t) => t.id) };
+}
+
+async function resolveStory(p, storyKey, { fetchIfMissing = true } = {}) {
+  let story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: storyKey });
+  if (!story && fetchIfMissing) {
+    const jira = jiraFor(p);
+    if (!jira.available) throw new HttpError(404, `Story ${storyKey} not found locally and Jira is unavailable.`, jira.unavailableExplanation());
+    story = upsertStory(p.id, await jira.getIssue(storyKey), 'jira');
+  }
+  if (!story) throw new HttpError(404, `Story ${storyKey} is not on this project.`);
+  return story;
+}
+
 // ── Generation ──
-async function proposeSuite(p, story, user) {
+async function proposeSuite(p, story, user, opts = {}) {
   const sf = salesforceFor(p);
   const t0 = Date.now();
-  const docs = repo.find('context_docs', 'projectId = $p', { p: p.id }, 'ORDER BY updatedAt DESC');
-  const { analysis, scenarios, source } = await generateProposedSuite({ project: p, story, sf, docs });
-  const classification = classifyStory(story);
+  const listed = Array.isArray(opts.docIds);
+  const requested = listed ? opts.docIds.map(String) : [];
+  const inputSource = resolveInputSource(opts.inputSource, { hasDocs: requested.length > 0 });
+  const wantDocs = inputSource !== 'jira';
+  let docs = [];
+  if (wantDocs) {
+    if (listed && requested.length) docs = loadStoryDocs(p, requested, { includeAllIfEmpty: false });
+    else if (listed && !requested.length) docs = [];
+    else docs = loadStoryDocs(p, [], { includeAllIfEmpty: true });
+  }
+  if (inputSource === 'docs' && !docs.length) {
+    throw new HttpError(400, 'Select at least one integration document to generate from docs.', { action: 'Paste or upload a local integration doc on Connections or the story page, then generate again.' });
+  }
+  const openapi = inputSource === 'jira' ? [] : openapiSummaries(p);
+  const { analysis, scenarios, source } = await generateProposedSuite({ project: p, story, sf, docs, openapi, inputSource });
+  const classification = inputSource === 'docs'
+    ? { needsApiTesting: true, confidence: 'medium', reasons: ['Generated from an integration document (ASSUMED).'] }
+    : classifyStory(story);
   const createdBy = `${user} · ${source || 'engine'}`;
-  const proposal = { id: nextId('GEN', 4), projectId: p.id, storyKey: story.key, status: 'proposed', analysis: { ...analysis, classification, generationMs: Date.now() - t0, generator: source || 'engine' }, scenarios, createdBy, createdAt: now() };
+  const proposal = {
+    id: nextId('GEN', 4), projectId: p.id, storyKey: story.key, status: 'proposed',
+    analysis: {
+      ...analysis,
+      classification,
+      generationMs: Date.now() - t0,
+      generator: source || 'engine',
+      inputSource,
+      docsUsed: docs.map((d) => ({ id: d.id, name: d.name })),
+    },
+    scenarios, createdBy, createdAt: now(),
+  };
   repo.insert('proposals', proposal);
-  audit('generation', 'suite.proposed', { user, projectId: p.id, detail: { proposalId: proposal.id, storyKey: story.key, source: source || 'engine', scenarios: scenarios.length, tests: scenarios.reduce((n, s) => n + s.testCases.length, 0) } });
-  require('../engine/workflow').touch(p.id, 'generate', 'completed', { proposalId: proposal.id, storyKey: story.key });
+  audit('generation', 'suite.proposed', { user, projectId: p.id, detail: { proposalId: proposal.id, storyKey: story.key, source: source || 'engine', inputSource, scenarios: scenarios.length, tests: scenarios.reduce((n, s) => n + s.testCases.length, 0), docs: docs.length } });
+  require('../engine/workflow').touch(p.id, 'generate', 'completed', { proposalId: proposal.id, storyKey: story.key, inputSource });
   require('../engine/workflow').touch(p.id, 'review', 'requires_approval', { proposalId: proposal.id });
   return proposal;
 }
 
 route('POST', '/api/generate', async (ctx) => {
   const p = projectFrom(ctx);
-  required(ctx.body, ['storyKey']);
-  let story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: ctx.body.storyKey });
-  if (!story) {
-    const jira = jiraFor(p);
-    if (!jira.available) throw new HttpError(404, `Story ${ctx.body.storyKey} not found locally and Jira is unavailable.`, jira.unavailableExplanation());
-    story = upsertStory(p.id, await jira.getIssue(ctx.body.storyKey), 'jira');
+  const keys = requestedStoryKeys(ctx.body);
+  const inputSource = resolveInputSource(ctx.body.inputSource || ctx.body.source, { hasDocs: Array.isArray(ctx.body.docIds) && ctx.body.docIds.length });
+  let story;
+  if (keys[0]) story = await resolveStory(p, keys[0]);
+  else if (inputSource === 'docs') {
+    const docs = loadStoryDocs(p, ctx.body.docIds, { includeAllIfEmpty: true });
+    if (!docs.length) throw new HttpError(400, 'Add an integration document before generating from docs.');
+    story = ensureDocStory(p, docs);
+  } else {
+    required(ctx.body, ['storyKey']);
   }
-  return proposeSuite(p, story, ctx.user);
+  return proposeSuite(p, story, ctx.user, { docIds: ctx.body.docIds, inputSource });
+});
+
+route('POST', '/api/stories/plan-from-docs', async (ctx) => {
+  const p = projectFrom(ctx);
+  const docIds = Array.isArray(ctx.body.docIds) ? ctx.body.docIds.map(String) : [];
+  const keys = requestedStoryKeys(ctx.body);
+  let story;
+  if (keys[0]) story = await resolveStory(p, keys[0]);
+  else {
+    const docs = loadStoryDocs(p, docIds, { includeAllIfEmpty: !docIds.length });
+    if (!docs.length) throw new HttpError(400, 'Add an integration document before generating from docs.');
+    story = ensureDocStory(p, docs);
+  }
+  // No docIds means "all project docs", same as the story-less path above.
+  const proposal = await proposeSuite(p, story, ctx.user, { docIds: docIds.length ? docIds : undefined, inputSource: 'docs' });
+  return { ...proposal, approved: false, note: 'Proposal only. Approve in the UI before tests are saved or run.' };
+});
+
+route('DELETE', '/api/stories/:key/tests', (ctx) => {
+  const p = projectFrom(ctx);
+  const story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: ctx.params.key });
+  if (!story) throw new HttpError(404, `Story ${ctx.params.key} is not on this project.`);
+  const r = transaction(() => deleteStoryGenerated(p, story.key));
+  audit('tests', 'story.tests-deleted', { user: ctx.user, projectId: p.id, detail: { storyKey: story.key, ...r } });
+  return { deleted: true, storyKey: story.key, tests: r.tests, scenarios: r.scenarios };
+});
+
+route('PATCH', '/api/proposals/:id', (ctx) => {
+  const pr = repo.get('proposals', ctx.params.id);
+  if (!pr) throw new HttpError(404, `Proposal ${ctx.params.id} not found.`);
+  if (pr.status !== 'proposed') throw new HttpError(409, `Proposal ${pr.id} was already ${pr.status}.`, { action: 'Generate a new proposal if you need to change tests.' });
+  const remove = Array.isArray(ctx.body.removeTests) ? ctx.body.removeTests : [];
+  if (!remove.length && ctx.body.clearAll !== true) throw new HttpError(400, 'Send removeTests or clearAll=true.');
+  let scenarios = pr.scenarios || [];
+  if (ctx.body.clearAll) scenarios = [];
+  else {
+    const drop = new Set(remove.map((x) => `${Number(x.si)}:${Number(x.ti)}`));
+    scenarios = scenarios.map((s, si) => ({
+      ...s,
+      testCases: (s.testCases || []).filter((_, ti) => !drop.has(`${si}:${ti}`)),
+    })).filter((s) => (s.testCases || []).length);
+  }
+  repo.update('proposals', pr.id, { scenarios });
+  audit('generation', 'proposal.tests-removed', { user: ctx.user, projectId: pr.projectId, detail: { proposalId: pr.id, remaining: scenarios.reduce((n, s) => n + s.testCases.length, 0) } });
+  return { ...pr, scenarios };
 });
 
 route('POST', '/api/stories/sync-and-generate', async (ctx) => {
@@ -116,12 +276,22 @@ route('POST', '/api/stories/sync-and-generate', async (ctx) => {
   const jira = jiraFor(p);
   if (!jira.available) throw new HttpError(503, jira.unavailableExplanation().title, jira.unavailableExplanation());
   const onlyNeedingApi = ctx.body.onlyNeedingApi !== false;
+  const keys = requestedStoryKeys(ctx.body);
   let issues;
-  try { issues = await jira.searchStories({ jql: ctx.body.jql }); } catch (e) {
-    throw new HttpError(502, e.explanation ? e.explanation.title : e.message, e.explanation || {});
+  try {
+    if (keys.length) {
+      issues = [];
+      for (const key of keys) issues.push(await jira.getIssue(key));
+    } else {
+      issues = await jira.searchStories({ jql: ctx.body.jql });
+    }
+  } catch (e) {
+    const code = e.code || (e.explanation && e.explanation.code);
+    const missing = code === 'JIRA_404' || code === 'INVALID_KEY';
+    throw new HttpError(missing ? 404 : 502, e.explanation ? e.explanation.title : e.message, e.explanation || {});
   }
   const saved = transaction(() => issues.map((i) => upsertStory(p.id, i, p.mode === 'demo' ? 'demo-jira' : 'jira')));
-  audit('jira', 'stories.synced', { user: ctx.user, projectId: p.id, detail: { count: saved.length, jql: ctx.body.jql || null, generate: true } });
+  audit('jira', 'stories.synced', { user: ctx.user, projectId: p.id, detail: { count: saved.length, jql: ctx.body.jql || null, generate: true, storyKeys: keys.length ? keys : null } });
   const selected = saved.filter((s) => {
     const cls = classifyStory(s);
     return onlyNeedingApi ? cls.needsApiTesting : true;
@@ -129,21 +299,32 @@ route('POST', '/api/stories/sync-and-generate', async (ctx) => {
   const skipped = saved.length - selected.length;
   const proposals = [];
   const errors = [];
+  const inputSource = resolveInputSource(ctx.body.inputSource || ctx.body.source, { hasDocs: false });
+  const docIds = Array.isArray(ctx.body.docIds) ? ctx.body.docIds.map(String) : [];
   for (const story of selected) {
     try {
-      const pr = await proposeSuite(p, story, ctx.user);
+      const pr = await proposeSuite(p, story, ctx.user, { inputSource: inputSource === 'docs' ? 'jira' : inputSource, docIds });
       const tests = pr.scenarios.reduce((n, s) => n + s.testCases.length, 0);
-      let approved = null;
-      if (ctx.body.approve) {
-        // Reuse the approve route logic by calling it internally would recurse HTTP; keep proposals for review by default.
-        approved = false;
-      }
-      proposals.push({ id: pr.id, storyKey: story.key, summary: story.summary, scenarios: pr.scenarios.length, tests, classification: pr.analysis.classification, approved });
+      proposals.push({
+        id: pr.id, storyKey: story.key, summary: story.summary, scenarios: pr.scenarios.length, tests,
+        classification: pr.analysis.classification, generator: (pr.analysis && pr.analysis.generator) || 'engine',
+        approved: false,
+      });
     } catch (e) {
       errors.push({ storyKey: story.key, title: e.explanation ? e.explanation.title : e.message });
     }
   }
-  return { synced: saved.length, selected: selected.length, skipped, proposals, errors };
+  const approveIgnored = Boolean(ctx.body.approve);
+  return {
+    synced: saved.length, selected: selected.length, skipped, proposals, errors,
+    approved: false,
+    approveIgnored,
+    scoped: keys.length > 0,
+    storyKeys: keys,
+    approveNote: approveIgnored
+      ? 'approve is ignored: this endpoint is generate-only. Story suites require a human to POST /api/proposals/:id/approve.'
+      : null,
+  };
 });
 
 route('GET', '/api/proposals/:id', (ctx) => {
@@ -154,7 +335,16 @@ route('GET', '/api/proposals/:id', (ctx) => {
 
 route('GET', '/api/proposals', (ctx) => {
   const p = projectFrom(ctx);
-  return all('SELECT id, storyKey, status, createdBy, createdAt, decidedAt FROM proposals WHERE projectId = $p ORDER BY createdAt DESC LIMIT 50', { p: p.id });
+  return repo.find('proposals', 'projectId = $p', { p: p.id }, 'ORDER BY createdAt DESC LIMIT 50').map((row) => {
+    const a = row.analysis || {};
+    return {
+      id: row.id, storyKey: row.storyKey, status: row.status, createdBy: row.createdBy,
+      createdAt: row.createdAt, decidedAt: row.decidedAt,
+      generator: a.generator || null,
+      inputSource: a.inputSource || null,
+      traceability: a.traceability || null,
+    };
+  });
 });
 
 /**
@@ -185,7 +375,8 @@ route('POST', '/api/proposals/:id/approve', async (ctx) => {
           title: t.title, description: t.description || null, apiType: t.apiType || 'REST', method: t.method, endpoint: t.endpoint, auth: t.auth || 'default',
           headers: t.headers || {}, query: t.query || {}, body: t.body === undefined ? null : t.body, bodyRaw: t.bodyRaw || null, assertions: t.assertions || [], extract: t.extract || [],
           sfValidation: t.sfValidation || null, cleanup: t.cleanup || null, timeoutMs: t.timeoutMs || null, object: t.object || s.object || null,
-          testType: t.testType, priority: t.priority, priorityReason: t.priorityReason || null, status: t.status || 'ready', label: t.label || s.label, tags: t.tags || [], automated: 1,
+          testType: t.testType, priority: t.priority, priorityReason: t.priorityReason || null, status: t.status || 'ready', label: t.label || s.label,
+          tags: [...new Set([...(t.tags || []), 'generated', `source:${(pr.analysis && pr.analysis.inputSource) || 'jira+docs'}`])], automated: 1,
           createdAt: now(), updatedAt: now(),
         });
         created.tests++;
@@ -220,7 +411,42 @@ route('POST', '/api/proposals/:id/approve', async (ctx) => {
       } catch (e) { jira = { ok: false, ...(e.explanation || { title: e.message }) }; }
     }
   }
-  return { ...created, jira, postman };
+  let run = null;
+  if (ctx.body.runNow) {
+    const tests = created.ids.map((id) => repo.get('test_cases', id)).filter(Boolean);
+    const runOpts = {
+      confirmProductionWrites: Boolean(ctx.body.confirmProductionWrites),
+      confirmDelete: Boolean(ctx.body.confirmDelete),
+      skipWrites: Boolean(ctx.body.skipWrites),
+      label: `Approved ${pr.id} · ${pr.storyKey}`,
+      trigger: 'approve-runNow',
+      postResultToJira: Boolean(ctx.body.postResultToJira),
+      storyKeys: [pr.storyKey],
+      proposalId: pr.id,
+      traceability: (pr.analysis && pr.analysis.traceability) || null,
+      executor: ['playwright', 'postman', 'platform'].includes(String(ctx.body.executor || '').toLowerCase())
+        ? String(ctx.body.executor).toLowerCase() : 'auto',
+    };
+    const start = (list) => {
+      const started = runner.startRun({ project: p, testCases: list, user: ctx.user, options: runOpts });
+      return { started: true, id: started.id, total: started.total };
+    };
+    if (isProduction(p)) {
+      const writes = tests.filter((t) => checkOperation(p, t, {}));
+      const deletes = tests.filter((t) => String(t.method).toUpperCase() === 'DELETE');
+      if (writes.length && !runOpts.confirmProductionWrites && !runOpts.skipWrites) {
+        run = { started: false, code: 'PRODUCTION_CONFIRMATION_REQUIRED', requires: 'confirmProductionWrites', title: PRODUCTION_WARNING, writeCount: writes.length, deleteCount: deletes.length };
+      } else if (deletes.length && runOpts.confirmProductionWrites && !runOpts.confirmDelete && !runOpts.skipWrites) {
+        run = { started: false, code: 'PRODUCTION_DELETE_CONFIRMATION_REQUIRED', requires: 'confirmDelete', title: `${PRODUCTION_WARNING} ${deletes.length} DELETE operation(s) require a second confirmation.`, deleteCount: deletes.length };
+      } else {
+        const executable = runOpts.skipWrites ? tests.filter((t) => !checkOperation(p, t, {})) : tests;
+        run = executable.length ? start(executable) : { started: false, title: 'All selected tests modify data; nothing left to run in read-only mode.' };
+      }
+    } else {
+      run = tests.length ? start(tests) : { started: false, title: 'No test cases to run.' };
+    }
+  }
+  return { ...created, jira, postman, run };
 });
 
 route('POST', '/api/proposals/:id/reject', (ctx) => {
@@ -288,4 +514,4 @@ route('POST', '/api/regression/impact', (ctx) => {
   return { objects: [...objects], impacted: [...impacted, ...p0], label: 'RECOMMENDED' };
 });
 
-module.exports = { upsertStory, storyCoverage };
+module.exports = { upsertStory, storyCoverage, proposeSuite, INPUT_SOURCES, normalizeInputSource, ensureDocStory, requestedStoryKeys };

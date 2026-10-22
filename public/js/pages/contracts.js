@@ -31,7 +31,7 @@
         detail.innerHTML = String(h`<div class="card">${loading(8)}</div>`);
         try {
           const c = await api.get(`/api/contracts/${id}`);
-          detail.innerHTML = String(h`<div class="card"><div class="card-head"><h2>${c.name} <span class="sub">${c.kind} · uploaded ${fmt.date(c.createdAt)}</span></h2><div class="row"><button class="btn sm" data-act="validate">${ic('check')} Validate latest run</button><button class="btn sm ghost" data-act="delete" aria-label="Delete contract">${ic('trash')}</button></div></div>
+          detail.innerHTML = String(h`<div class="card"><div class="card-head"><h2>${c.name} <span class="sub">${c.kind} · uploaded ${fmt.date(c.createdAt)}</span></h2><div class="row"><button class="btn sm" data-act="as-ep">${ic('code')} Import as endpoints</button><button class="btn sm" data-act="validate">${ic('check')} Validate latest run</button><button class="btn sm ghost" data-act="delete" aria-label="Delete contract">${ic('trash')}</button></div></div>
             ${QA.ui.table({ rows: c.operations, columns: [
               { key: 'method', label: 'Method', render: (o) => method(o.method) }, { key: 'path', label: 'Path', render: (o) => h`<code class="mono small">${o.path}</code>` },
               { key: 'summary', label: 'Summary', render: (o) => h`<span class="small">${o.summary}</span><div class="cell-sub mono">${o.id}</div>` }, { key: 'responses', label: 'Responses', render: (o) => h`${(o.responses || []).map((r) => h`<span class="tag">${r}</span>`)}` },
@@ -46,6 +46,12 @@
         } catch (e) { detail.innerHTML = String(errorBox(e)); }
       }
       on(listEl, 'click', '[data-c]', (e, el) => open(el.dataset.c));
+      on(detail, 'click', '[data-act=as-ep]', (e, el) => withBusy(el, async () => {
+        try {
+          const r = await api.post(`/api/projects/${p.id}/endpoints/from-openapi`, { contractId: current });
+          toast(`Imported ${r.added} of ${r.found} operations as project endpoints.`, 'ok');
+        } catch (err) { toastError(err, 'Import failed'); }
+      }));
       on(detail, 'click', '[data-act=validate]', (e, el) => withBusy(el, async () => {
         const out = detail.querySelector('[data-validation]');
         try {

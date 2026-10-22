@@ -1,10 +1,16 @@
 'use strict';
 /**
- * Cursor CLI (`cursor` or `agent`) for script generation.
+ * Cursor CLI (`agent`, then `cursor`) for script generation.
  * Login: `agent login` (verified via `agent --help`; opens a browser).
  * Status/Test: `agent whoami --format json` (same help: status|whoami).
  * Generate: `--print --output-format json --mode ask`. No API keys collected.
+ *
+ * `~/.local/bin/cursor` is often an IDE shim that errors with
+ * "No Cursor IDE installation found" unless argv[1] is `agent`.
+ * `cursor agent login` becomes `agent agent login` and also fails.
+ * Prefer the `agent` binary for login / whoami / generate.
  */
+const fs = require('node:fs');
 const path = require('node:path');
 const { findBin, runCli, spawnDetached } = require('../lib/cli-spawn');
 const { config } = require('../config');
@@ -24,17 +30,45 @@ function cursorSettings(project) {
   };
 }
 
+/** True for the installer shim that cannot run `login` / `whoami` itself. */
+function isCursorIdeShim(bin) {
+  if (!bin || path.basename(bin) === 'agent' || path.basename(bin) === 'cursor-agent') return false;
+  try {
+    const fd = fs.openSync(bin, 'r');
+    const buf = Buffer.alloc(4000);
+    const n = fs.readSync(fd, buf, 0, 4000, 0);
+    fs.closeSync(fd);
+    const text = buf.slice(0, n).toString('utf8');
+    return /No Cursor IDE installation found/i.test(text) && /cursor agent/i.test(text);
+  } catch {
+    return false;
+  }
+}
+
 function detectCursorBin(configured) {
-  if (configured && path.isAbsolute(configured)) return findBin([configured]);
-  if (configured) return findBin([configured, 'cursor', 'agent']);
-  return findBin(['cursor', 'agent']);
+  if (configured && path.isAbsolute(configured)) {
+    const found = findBin([configured]);
+    return found && !isCursorIdeShim(found) ? found : null;
+  }
+  const names = [];
+  if (configured) names.push(configured);
+  names.push('agent', 'cursor-agent', 'cursor');
+  const tried = new Set();
+  for (const name of names) {
+    if (!name || tried.has(name)) continue;
+    tried.add(name);
+    const found = findBin([name]);
+    if (found && !isCursorIdeShim(found)) return found;
+  }
+  return null;
 }
 
 function parseWhoami(stdout) {
   try {
     const j = JSON.parse(String(stdout || '').trim());
     const loggedIn = j.isAuthenticated === true || j.status === 'authenticated';
-    const account = j.email || j.username || j.user || (loggedIn ? 'logged in' : null);
+    const info = j.userInfo || {};
+    const account = j.email || j.username || j.user || info.email || info.username || (loggedIn ? 'logged in' : null);
     return { loggedIn, account, rawStatus: j.status || null };
   } catch {
     const t = String(stdout || '');
@@ -67,7 +101,7 @@ class CursorCliAdapter {
         code: 'CURSOR_CLI_MISSING',
         title: 'Cursor CLI is not installed.',
         cause: 'Neither `cursor` nor `agent` was found on PATH (including ~/.local/bin).',
-        action: 'Install the Cursor CLI (`agent` or `cursor`), then Connect Cursor to log in. Generate still uses the built-in engine until you are logged in.',
+        action: 'Install the Cursor CLI (`agent`), then Connect Cursor to log in. Generate still uses the built-in engine until you are logged in.',
         category: 'configuration',
         evidence: [],
       };
@@ -99,14 +133,21 @@ class CursorCliAdapter {
 
   startLogin() {
     if (!this.bin) return { ok: false, ...this.unavailableExplanation() };
-    spawnDetached(this.bin, ['login'], { cwd: config.root });
+    // agent login opens a browser; a detached spawn from this Node server often
+    // cannot (no TTY / GUI). On macOS open Terminal, same as Gemini Connect.
+    if (process.platform === 'darwin' && !process.env.NODE_TEST_CONTEXT) {
+      const cmd = `${JSON.stringify(this.bin)} login`;
+      spawnDetached('osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(cmd)}`]);
+    } else {
+      spawnDetached(this.bin, ['login'], { cwd: config.root });
+    }
     return {
       ok: true,
       started: true,
       kind: 'cursor-cli',
       command: `${path.basename(this.bin)} login`,
       title: 'Cursor login started.',
-      text: 'A browser window should open for Cursor. Finish signing in, then click Test. Nothing is stored in this app.',
+      text: 'A Terminal window should run `agent login` and open a browser. Finish signing in, then click Test. Nothing is stored in this app.',
     };
   }
 
@@ -164,4 +205,4 @@ function cursorFor(project) {
   return new CursorCliAdapter(project);
 }
 
-module.exports = { CursorCliAdapter, cursorFor, cursorSettings, detectCursorBin, parseWhoami };
+module.exports = { CursorCliAdapter, cursorFor, cursorSettings, detectCursorBin, parseWhoami, isCursorIdeShim };

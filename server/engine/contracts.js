@@ -137,4 +137,4 @@ function attachToScenarios(project, scenarios) {
   return n;
 }
 
-module.exports = { parse, listOperations, validateExchange, validateAgainst, detectKind, findOperation, attachToScenarios };
+module.exports = { parse, listOperations, validateExchange, validateAgainst, detectKind, findOperation, attachToScenarios, requestSchema };

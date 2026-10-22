@@ -8,7 +8,7 @@ const { buildPayload } = require('../engine/generator');
 const contracts = require('../engine/contracts');
 const { isProduction } = require('../engine/safety');
 const { maskDeep } = require('../lib/mask');
-const { projectFrom, getProject, paginate, inFilter, likeFilter } = require('./util');
+const { projectFrom, paginate, inFilter, likeFilter } = require('./util');
 
 // Test-data categories mirror the plan: positive, negative, boundary, security, integration, bulk, regression (+ performance).
 const CATEGORIES = ['Positive', 'Negative', 'Boundary', 'Security', 'Integration', 'Bulk', 'Regression', 'Performance'];
@@ -209,11 +209,40 @@ route('GET', '/api/requests', (ctx) => {
 route('POST', '/api/requests', (ctx) => {
   const p = projectFrom(ctx);
   required(ctx.body, ['name', 'method', 'path']);
-  if (Object.keys(ctx.body.headers || {}).some((h) => /^authorization$/i.test(h))) throw new HttpError(400, 'Saved requests cannot contain Authorization headers.');
-  const r = { id: crypto.randomUUID(), projectId: p.id, name: ctx.body.name, collection: ctx.body.collection || 'Default', apiType: ctx.body.apiType || 'REST', method: String(ctx.body.method).toUpperCase(), path: ctx.body.path, headers: ctx.body.headers || {}, query: ctx.body.query || {}, body: ctx.body.body === undefined ? null : ctx.body.body, auth: ctx.body.auth || 'default', createdAt: now() };
+  const extra = ctx.body.extra || {
+    bodyMode: ctx.body.bodyMode,
+    authConfig: ctx.body.authConfig,
+    preRequest: ctx.body.preRequest,
+    tests: ctx.body.tests,
+    folder: ctx.body.folder,
+    queryRows: ctx.body.queryRows,
+    headerRows: ctx.body.headerRows,
+    form: ctx.body.form,
+    graphql: ctx.body.graphql,
+    protocol: ctx.body.protocol,
+  };
+  const r = {
+    id: crypto.randomUUID(), projectId: p.id, name: ctx.body.name,
+    collection: ctx.body.collection || 'Default', apiType: ctx.body.apiType || 'REST',
+    method: String(ctx.body.method).toUpperCase(), path: ctx.body.path,
+    headers: ctx.body.headers || {}, query: ctx.body.query || {},
+    body: ctx.body.body === undefined ? null : ctx.body.body,
+    auth: ctx.body.auth || 'default', extra, createdAt: now(),
+  };
   repo.insert('saved_requests', r);
   audit('explorer', 'request.saved', { user: ctx.user, projectId: p.id, detail: { name: r.name } });
   return r;
+});
+
+route('PUT', '/api/requests/:id', (ctx) => {
+  const r = repo.get('saved_requests', ctx.params.id);
+  if (!r) throw new HttpError(404, `Saved request ${ctx.params.id} not found.`);
+  const patch = {};
+  for (const k of ['name', 'collection', 'apiType', 'method', 'path', 'headers', 'query', 'body', 'auth', 'extra']) {
+    if (ctx.body[k] !== undefined) patch[k] = k === 'method' ? String(ctx.body[k]).toUpperCase() : ctx.body[k];
+  }
+  repo.update('saved_requests', r.id, patch);
+  return { ...r, ...patch };
 });
 
 route('DELETE', '/api/requests/:id', (ctx) => {

@@ -3,19 +3,20 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 const { route, HttpError, required } = require('../http');
-const { repo, all, get, now, audit, nextId } = require('../db');
-const { config, credentialStatus, salesforceCredentials, salesforceMcpSettings, commerceCredentials, normRef, secretValues } = require('../config');
-const { salesforceFor, jiraFor, commerceFor, commerceEnabled, metadataLabel, postmanFor, httpFor, cursorFor, geminiFor } = require('../connectors');
+const { repo, all, get, now, audit, nextId, transaction, run } = require('../db');
+const { config, credentialStatus, salesforceCredentials, salesforceMcpSettings, normRef, secretValues } = require('../config');
+const { salesforceFor, jiraFor, commerceFor, commerceEnabled, metadataLabel, postmanFor, playwrightFor, httpFor, cursorFor, geminiFor } = require('../connectors');
 const { detectCursorBin } = require('../connectors/cursor-cli');
 const { detectGeminiBin } = require('../connectors/gemini-cli');
 const { SalesforceCliAdapter, orgAlias } = require('../connectors/salesforce-cli');
-const { classifyLoginUrl, normalizeLoginUrl, publicDetection } = require('../connectors/salesforce-org');
+const { classifyLoginUrl, salesforceLoginOrigin, publicDetection, typeForOrgKind, ORG_KIND } = require('../connectors/salesforce-org');
 const { detectFromConnector, autoConnectPatch } = require('../engine/salesforce-detect');
-const { scriptGeneratorPref, safeLocalPath, readLocalDocFile, looksLikeSecretText } = require('../engine/cli-generator');
+const { scriptGeneratorPref, safeLocalPath, readLocalDocFile, looksLikeSecretText, CLI_JSON_CONTRACT } = require('../engine/cli-generator');
 const workflow = require('../engine/workflow');
 const { upsertEnv } = require('../lib/dotenv-write');
 const { registerSecrets } = require('../lib/mask');
 const { getProject, paginate, likeFilter } = require('./util');
+const { applyEnvironmentToProject } = require('../engine/env-apply');
 const ai = require('../engine/ai');
 
 const ENVIRONMENTS = config.environments;
@@ -25,12 +26,16 @@ function validateProject(p, partial = false) {
   if (!partial) required(p, ['name', 'environment', 'apiVersion']);
   if (p.environment !== undefined && !ENVIRONMENTS.includes(p.environment)) throw new HttpError(400, `Environment must be one of: ${ENVIRONMENTS.join(', ')}.`);
   if (p.apiVersion !== undefined && !/^\d{2}\.0$/.test(String(p.apiVersion))) throw new HttpError(400, 'API version must look like 62.0.', { action: 'Use the version number shown in Setup → Apex Classes → Version, e.g. 62.0.' });
+  const orgKind = (p.integrationConfig && p.integrationConfig.orgKind) || '';
   if (p.instanceUrl) {
-    const origin = normalizeLoginUrl(p.instanceUrl);
-    if (!origin || !/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(origin)) {
+    const origin = salesforceLoginOrigin(p.instanceUrl);
+    if (origin) {
+      p.instanceUrl = origin;
+    } else if (orgKind === ORG_KIND.HTTP) {
+      p.instanceUrl = null;
+    } else {
       throw new HttpError(400, 'Instance URL must be an https:// Salesforce or Commerce Cloud host, e.g. https://acme--qa.sandbox.my.salesforce.com', { action: 'Use the org login URL, My Domain, sandbox, or an SFCC Business Manager host.' });
     }
-    p.instanceUrl = origin;
   }
   if (p.jiraUrl && !/^https:\/\/[a-z0-9.-]+(:\d+)?\/?$/i.test(p.jiraUrl)) throw new HttpError(400, 'Jira URL must be an https:// origin, e.g. https://acme.atlassian.net');
   if (p.mode !== undefined && !['demo', 'live'].includes(p.mode)) throw new HttpError(400, 'Mode must be "demo" or "live".');
@@ -57,7 +62,7 @@ function cliConnectionView(tool, p) {
   const adapter = tool === 'cursor' ? cursorFor(p) : geminiFor(p);
   const detected = tool === 'cursor' ? detectCursorBin(((p.integrationConfig || {}).cursor || {}).bin) : detectGeminiBin(((p.integrationConfig || {}).gemini || {}).bin);
   const name = tool === 'cursor' ? 'Cursor' : 'Gemini';
-  const binNames = tool === 'cursor' ? '`cursor` / `agent`' : '`gemini`';
+  const binNames = tool === 'cursor' ? '`agent`' : '`gemini`';
   const login = cliLoginSafe(adapter);
   if (!detected) {
     return { status: 'unavailable', loggedIn: false, label: `${name} CLI is not installed (${binNames} not on PATH). Generate still uses the built-in engine.` };
@@ -87,14 +92,17 @@ function projectView(p) {
   const orgOn = Boolean(salesforceCredentials(p.credentialRef));
   const det = publicDetection(((p.integrationConfig || {}).salesforceDetection) || {}) || {};
   const types = det.types || [];
-  const typeLabel = types.length ? types.join(', ') : '';
+  const orgKind = ((p.integrationConfig || {}).orgKind) || det.orgKind || null;
+  const typeLabel = types.length ? types.join(', ') : (typeForOrgKind(orgKind) || '');
   let sf;
-  if (p.mode === 'demo') sf = { status: 'demo', label: 'Demo org simulator', types: ['Salesforce Core'] };
-  else if (det.connected && det.loginKind === 'core') {
-    sf = { status: 'connected', label: typeLabel ? `Connected · ${typeLabel}` : 'Connected — Salesforce CLI browser login', types, orgId: det.orgId, edition: det.edition, explanation: det.explanation };
+  if (p.mode === 'demo') {
+    const demoTypes = types.length ? types : (typeLabel ? [typeLabel] : ['Salesforce Core']);
+    sf = { status: 'demo', label: demoTypes.some((t) => /SFCC/i.test(t)) ? `Demo ${demoTypes.join(', ')} simulator` : 'Demo org simulator', types: demoTypes, orgKind };
+  } else if (det.connected && det.loginKind === 'core') {
+    sf = { status: 'connected', label: typeLabel ? `Connected · ${typeLabel}` : 'Connected — Salesforce CLI browser login', types, orgKind, orgId: det.orgId, edition: det.edition, explanation: det.explanation };
   } else if (det.connected && det.loginKind === 'sfcc') {
-    sf = { status: 'connected', label: 'Connected · B2C Commerce / SFCC (not Core CRM)', types, explanation: det.explanation };
-  }   else if (orgOn && mcpOn) sf = { status: 'configured', label: 'Org OAuth + MCP configured', types };
+    sf = { status: 'connected', label: typeLabel ? `Connected · ${typeLabel} (not Core CRM)` : 'Connected · SFCC (not Core CRM)', types, orgKind, explanation: det.explanation };
+  } else if (orgOn && mcpOn) sf = { status: 'configured', label: 'Org OAuth + MCP configured', types, orgKind };
   else if (orgOn) sf = { status: 'configured', label: 'Org OAuth configured', types };
   else if (mcpOn) sf = { status: 'configured', label: 'Salesforce MCP configured (metadata)', types };
   else if (((p.integrationConfig || {}).salesforceCli || {}).enabled && ((p.integrationConfig || {}).salesforceCli || {}).targetOrg) {
@@ -102,31 +110,62 @@ function projectView(p) {
   } else sf = { status: 'unavailable', label: require('../config').SF_UNAVAILABLE_MESSAGE };
   const ccOn = commerceEnabled(p);
   let commerce;
-  if (det.connected && (det.loginKind === 'sfcc' || types.includes('SFCC') || types.includes('B2C Commerce'))) {
-    commerce = { status: 'connected', label: det.host ? `Connected · B2C Commerce / SFCC (${det.host})` : 'Connected · B2C Commerce / SFCC', types: types.filter((t) => /B2C|SFCC/i.test(t)) };
+  const sfccTypes = types.filter((t) => /SFCC/i.test(t) || t === 'B2C Commerce');
+  if (det.connected && (det.loginKind === 'sfcc' || sfccTypes.length)) {
+    const ccLabel = sfccTypes.join(', ') || 'SFCC';
+    commerce = { status: 'connected', label: det.host ? `Connected · ${ccLabel} (${det.host})` : `Connected · ${ccLabel}`, types: sfccTypes };
   } else if (!ccOn) commerce = { status: 'off', label: 'Commerce Cloud not enabled' };
   else if (p.mode === 'demo') commerce = { status: 'demo', label: 'Demo Commerce Cloud storefront' };
   else if (cs.commerce.configured) commerce = { status: 'configured', label: 'Commerce Cloud credentials configured' };
   else commerce = { status: 'unavailable', label: 'Commerce Cloud is enabled but SFCC credentials are missing.' };
   return {
     ...p,
+    orgKind,
     stats: { tests: stats.tests, lastRun: last || null, passRate: last && last.passed + last.failed ? Math.round((last.passed / (last.passed + last.failed)) * 1000) / 10 : null },
     connection: {
       salesforce: sf,
       jira: p.mode === 'demo' ? { status: 'demo', label: 'Demo Jira' } : cs.jira.configured && p.jiraUrl ? { status: 'configured', label: 'Credentials configured' } : { status: 'unavailable', label: 'Jira is not configured — defects can be drafted but not created.' },
       commerce,
-      postman: p.mode === 'demo'
-        ? { status: 'demo', label: 'Demo / local Postman collections' }
-        : (cs.postman && cs.postman.configured) || (p.integrationConfig && p.integrationConfig.postman && (p.integrationConfig.postman.mcpUrl || p.integrationConfig.postman.workspace))
-          ? { status: 'configured', label: 'Postman workspace configured' }
-          : postmanFor(p).available
-            ? { status: 'configured', label: 'Local Postman collections' }
-            : { status: 'unavailable', label: 'Postman MCP is not configured — local collections can still be reused.' },
+      postman: (() => {
+        const pmCfg = (p.integrationConfig && p.integrationConfig.postman) || {};
+        const base = p.mode === 'demo'
+          ? { status: 'demo', label: 'Demo / local Postman collections' }
+          : (cs.postman && cs.postman.configured) || pmCfg.mcpUrl || pmCfg.workspace
+            ? { status: 'configured', label: 'Postman workspace configured' }
+            : postmanFor(p).available
+              ? { status: 'configured', label: 'Local Postman collections' }
+              : { status: 'unavailable', label: 'Postman MCP is not configured — local collections can still be reused.' };
+        return {
+          ...base,
+          workspace: pmCfg.workspace || null,
+          collectionId: pmCfg.collectionId || p.postmanCollection || null,
+          reuseExisting: pmCfg.reuseExisting === true,
+        };
+      })(),
       http: (() => {
         const base = ((p.integrationConfig || {}).http || {}).baseUrl || (cs.http && cs.http.baseUrl);
         if (base) return { status: 'configured', label: `Frontend HTTP ${String(base).replace(/^https?:\/\//, '')}`, baseUrl: base };
         if (httpFor(p).available) return { status: 'configured', label: 'Frontend HTTP base URL set' };
         return { status: 'off', label: 'No frontend HTTP base URL — collection requests with absolute URLs still run' };
+      })(),
+      playwright: (() => {
+        const pw = playwrightFor(p);
+        const cfg = (p.integrationConfig && p.integrationConfig.playwright) || {};
+        if (p.mode === 'demo') return { status: 'demo', label: 'Demo uses the platform simulator', canExecute: false };
+        if (pw.canExecute) return { status: 'configured', label: 'Playwright MCP configured', canExecute: true, mcpUrl: cfg.mcpUrl || null };
+        if (cfg.mcpUrl || cfg.mcpCommand || (cs.playwright && cs.playwright.configured)) {
+          return { status: 'unavailable', label: 'Playwright MCP is set but not reachable', canExecute: false };
+        }
+        return { status: 'off', label: 'Playwright MCP not connected — pick it on Run when ready', canExecute: false };
+      })(),
+      runners: (() => {
+        const pm = postmanFor(p);
+        const pw = playwrightFor(p);
+        return {
+          platform: { id: 'platform', available: true, label: 'Platform runner' },
+          postman: { id: 'postman', available: p.mode !== 'demo' && pm.canExecute, label: p.mode === 'demo' ? 'Postman MCP (live projects)' : (pm.canExecute ? 'Postman MCP' : 'Postman MCP (not connected)') },
+          playwright: { id: 'playwright', available: p.mode !== 'demo' && pw.canExecute, label: p.mode === 'demo' ? 'Playwright MCP (live projects)' : (pw.canExecute ? 'Playwright MCP' : 'Playwright MCP (not connected)') },
+        };
       })(),
       cursor: cliConnectionView('cursor', p),
       gemini: cliConnectionView('gemini', p),
@@ -138,6 +177,10 @@ function projectView(p) {
 
 route('GET', '/api/health', () => ({ ok: true, version: config.version, time: now() }));
 
+function envFlag(v) {
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
 route('GET', '/api/meta', (ctx) => ({
   version: config.version, user: ctx.user, environments: ENVIRONMENTS, aiEnabled: ai.enabled(),
   apiTypes: ['REST', 'SOAP', 'Bulk API', 'Bulk API 2.0', 'Composite', 'Composite Graph', 'GraphQL', 'Tooling', 'Metadata', 'Connect REST', 'Apex REST', 'Apex SOAP', 'Platform Events', 'Change Data Capture', 'OAuth', 'OCAPI', 'SCAPI'],
@@ -145,6 +188,14 @@ route('GET', '/api/meta', (ctx) => ({
   priorities: ['P0', 'P1', 'P2', 'P3'],
   modes: ['Discover', 'Generate', 'Execute', 'Validate', 'Analyze', 'Defect', 'Regression', 'Report'],
   workflowSteps: workflow.STEPS,
+  generators: {
+    cursorCliEnabled: envFlag(process.env.CURSOR_CLI_ENABLED),
+    geminiCliEnabled: envFlag(process.env.GEMINI_CLI_ENABLED),
+    cursorInstalled: Boolean(detectCursorBin('')),
+    geminiInstalled: Boolean(detectGeminiBin('')),
+    scriptGeneratorDefault: 'auto',
+  },
+  cliContract: CLI_JSON_CONTRACT,
 }));
 
 // ── Projects ──
@@ -177,11 +228,33 @@ route('PUT', '/api/projects/:id', (ctx) => {
   return projectView(repo.get('projects', p.id));
 });
 
+const PROJECT_PURGE_TABLES = [
+  'run_results', 'runs', 'test_cases', 'scenarios', 'defects', 'proposals',
+  'stories', 'saved_requests', 'contracts', 'collections', 'collection_proposals',
+  'context_docs', 'http_environments', 'http_cookies', 'request_history',
+  'console_logs', 'mock_servers', 'workflow_state', 'test_data',
+];
+
+function purgeProject(id) {
+  transaction(() => {
+    for (const t of PROJECT_PURGE_TABLES) {
+      try { run(`DELETE FROM ${t} WHERE projectId = $p`, { p: id }); } catch { /* table may not exist on older DBs */ }
+    }
+    repo.remove('projects', id);
+  });
+}
+
 route('DELETE', '/api/projects/:id', (ctx) => {
   const p = getProject(ctx.params.id);
-  repo.update('projects', p.id, { status: 'archived', updatedAt: now() });
-  audit('project', 'project.archived', { user: ctx.user, projectId: p.id });
-  return { archived: true };
+  const archive = ctx.query.archive === 'true' || (ctx.body && ctx.body.archive === true);
+  if (archive) {
+    repo.update('projects', p.id, { status: 'archived', updatedAt: now() });
+    audit('project', 'project.archived', { user: ctx.user, projectId: p.id });
+    return { archived: true, id: p.id };
+  }
+  purgeProject(p.id);
+  audit('project', 'project.deleted', { user: ctx.user, projectId: p.id, detail: { name: p.name } });
+  return { deleted: true, id: p.id, name: p.name };
 });
 
 route('GET', '/api/projects/:id/connection', (ctx) => {
@@ -194,6 +267,7 @@ route('GET', '/api/projects/:id/connection', (ctx) => {
     salesforceCli: (p.integrationConfig && p.integrationConfig.salesforceCli) || {},
     salesforceSource: (p.integrationConfig && p.integrationConfig.salesforceSource) || 'mcp',
     postman: (p.integrationConfig && p.integrationConfig.postman) || {},
+    playwright: (p.integrationConfig && p.integrationConfig.playwright) || {},
     http: (p.integrationConfig && p.integrationConfig.http) || {},
     commerce: (p.integrationConfig && p.integrationConfig.commerce) || {},
     cursor: (p.integrationConfig && p.integrationConfig.cursor) || {},
@@ -204,6 +278,14 @@ route('GET', '/api/projects/:id/connection', (ctx) => {
     experience: (p.integrationConfig && p.integrationConfig.experience) || {},
     scriptGenerator: scriptGeneratorPref(p),
     contextDocs: contextDocsFor(p.id),
+    postResultToJira: Boolean((p.integrationConfig || {}).postResultToJira),
+    generators: {
+      cursorCliEnabled: envFlag(process.env.CURSOR_CLI_ENABLED),
+      geminiCliEnabled: envFlag(process.env.GEMINI_CLI_ENABLED),
+      cursorInstalled: Boolean(detectCursorBin(((p.integrationConfig || {}).cursor || {}).bin)),
+      geminiInstalled: Boolean(detectGeminiBin(((p.integrationConfig || {}).gemini || {}).bin)),
+    },
+    cliContract: CLI_JSON_CONTRACT,
     loopback: isLoopback(ctx),
   };
 });
@@ -217,12 +299,12 @@ route('POST', '/api/projects/:id/connection/test', async (ctx) => {
   const p = getProject(ctx.params.id);
   const target = String((ctx.body && ctx.body.target) || ctx.query.target || 'all').toLowerCase();
   const want = (k) => target === 'all' || target === k;
-  const out = { salesforce: null, jira: null, commerce: null, postman: null, http: null, cursor: null, gemini: null };
+  const out = { salesforce: null, jira: null, commerce: null, postman: null, playwright: null, http: null, cursor: null, gemini: null };
   if (want('salesforce')) {
     const classified = classifyLoginUrl(p.instanceUrl);
     if (p.mode !== 'demo' && classified.kind === 'sfcc') {
       try {
-        const det = await detectFromConnector(null, { url: p.instanceUrl });
+        const det = await detectFromConnector(null, { url: p.instanceUrl, name: p.name, siteId: ((p.integrationConfig || {}).commerce || {}).siteId });
         const applied = persistSalesforceAutoConnect(p, det);
         out.salesforce = { ok: true, kind: 'sfcc', detection: applied.detection, autoConnected: applied.cards, types: (applied.detection && applied.detection.types) || classified.types };
       } catch (e) { out.salesforce = { ok: false, ...(e.explanation || { title: e.message }) }; }
@@ -233,7 +315,7 @@ route('POST', '/api/projects/:id/connection/test', async (ctx) => {
       } catch (e) { out.salesforce = { ok: false, ...(e.explanation || { title: e.message }) }; }
       if (p.mode !== 'demo' && out.salesforce && out.salesforce.ok) {
         try {
-          const det = await detectFromConnector(sf, { url: out.salesforce.instanceUrl || p.instanceUrl });
+          const det = await detectFromConnector(sf, { url: out.salesforce.instanceUrl || p.instanceUrl, name: p.name });
           const applied = persistSalesforceAutoConnect(p, det);
           out.salesforce.detection = applied.detection;
           out.salesforce.autoConnected = applied.cards;
@@ -269,6 +351,12 @@ route('POST', '/api/projects/:id/connection/test', async (ctx) => {
       out.postman = await pm.testConnection();
     } catch (e) { out.postman = { ok: false, ...(e.explanation || { title: e.message }) }; }
   }
+  if (want('playwright')) {
+    const pw = playwrightFor(p);
+    try {
+      out.playwright = await pw.testConnection();
+    } catch (e) { out.playwright = { ok: false, ...(e.explanation || { title: e.message }) }; }
+  }
   if (want('cursor')) {
     try { out.cursor = await cursorFor(p).testConnection(); } catch (e) { out.cursor = { ok: false, title: e.message }; }
   }
@@ -276,14 +364,22 @@ route('POST', '/api/projects/:id/connection/test', async (ctx) => {
     try { out.gemini = await geminiFor(p).testConnection(); } catch (e) { out.gemini = { ok: false, title: e.message }; }
   }
   if (out.salesforce) workflow.touch(p.id, 'salesforce', out.salesforce.ok ? 'completed' : 'failed', { salesforce: out.salesforce.ok });
-  audit('project', 'connection.tested', { user: ctx.user, projectId: p.id, detail: { target, salesforce: out.salesforce && out.salesforce.ok, jira: out.jira && out.jira.ok, commerce: out.commerce && out.commerce.ok, postman: out.postman && out.postman.ok, cursor: out.cursor && out.cursor.ok, gemini: out.gemini && out.gemini.ok } });
+  audit('project', 'connection.tested', { user: ctx.user, projectId: p.id, detail: { target, salesforce: out.salesforce && out.salesforce.ok, jira: out.jira && out.jira.ok, commerce: out.commerce && out.commerce.ok, postman: out.postman && out.postman.ok, playwright: out.playwright && out.playwright.ok, cursor: out.cursor && out.cursor.ok, gemini: out.gemini && out.gemini.ok } });
   return out;
 });
 
 function persistSalesforceAutoConnect(p, det) {
+  const { ensureOrgKindSiblings } = require('../engine/salesforce-detect');
   const applied = autoConnectPatch(p, det);
-  applied.patch.updatedAt = now();
-  repo.update('projects', p.id, applied.patch);
+  if (!applied.skipped && applied.patch && Object.keys(applied.patch).length) {
+    applied.patch.updatedAt = now();
+    repo.update('projects', p.id, applied.patch);
+  }
+  const fresh = repo.get('projects', p.id) || p;
+  const extra = applied.skipped === 'org-kind-mismatch' && applied.detection && applied.detection.orgKind
+    ? [applied.detection.orgKind, ...(applied.extraKinds || [])]
+    : applied.extraKinds;
+  applied.siblings = ensureOrgKindSiblings(fresh, applied.detection || det, extra);
   return applied;
 }
 
@@ -358,11 +454,25 @@ route('PUT', '/api/projects/:id/connection', (ctx) => {
     };
   }
   if (b.postman && typeof b.postman === 'object') {
+    const prevPm = ic.postman || {};
     ic.postman = {
+      ...prevPm,
       workspace: String(b.postman.workspace || '').trim(),
       environment: String(b.postman.environment || '').trim(),
       mcpUrl: String(b.postman.mcpUrl || '').trim(),
       mcpCommand: String(b.postman.mcpCommand || '').trim(),
+    };
+    if (b.postman.collectionId !== undefined) ic.postman.collectionId = String(b.postman.collectionId || '').trim();
+    if (b.postman.environmentId !== undefined) ic.postman.environmentId = String(b.postman.environmentId || '').trim();
+    if (b.postman.runCollectionId !== undefined) ic.postman.runCollectionId = String(b.postman.runCollectionId || '').trim();
+    if (b.postman.reuseExisting !== undefined) ic.postman.reuseExisting = Boolean(b.postman.reuseExisting);
+  }
+  if (b.playwright && typeof b.playwright === 'object') {
+    ic.playwright = {
+      ...((ic.playwright) || {}),
+      mcpUrl: String(b.playwright.mcpUrl || '').trim(),
+      mcpCommand: String(b.playwright.mcpCommand || '').trim(),
+      enabled: b.playwright.enabled !== false,
     };
   }
   if (b.http && typeof b.http === 'object') {
@@ -387,6 +497,9 @@ route('PUT', '/api/projects/:id/connection', (ctx) => {
   if (b.scriptGenerator && ['auto', 'cursor', 'gemini', 'engine'].includes(b.scriptGenerator)) {
     ic.scriptGenerator = b.scriptGenerator;
   }
+  if (b.postResultToJira !== undefined) {
+    ic.postResultToJira = Boolean(b.postResultToJira);
+  }
   if (b.commerce && typeof b.commerce === 'object') {
     const prev = ic.commerce || {};
     ic.commerce = {
@@ -400,6 +513,17 @@ route('PUT', '/api/projects/:id/connection', (ctx) => {
       credentialRef: String(b.commerce.credentialRef || prev.credentialRef || b.credentialRef || p.credentialRef || '').trim() || null,
       sampleProductId: String(b.commerce.sampleProductId || prev.sampleProductId || ''),
     };
+    if (ic.commerce.orgId) {
+      const tdc = {
+        ...(p.testDataConfig || {}),
+        autoCleanup: ((p.testDataConfig || {}).autoCleanup) !== false,
+        variables: { ...((p.testDataConfig && p.testDataConfig.variables) || {}) },
+      };
+      tdc.variables.organization_id = tdc.variables.organization_id || ic.commerce.orgId;
+      tdc.variables.organizationId = tdc.variables.organizationId || ic.commerce.orgId;
+      tdc.variables.ccOrgId = tdc.variables.ccOrgId || ic.commerce.orgId;
+      patch.testDataConfig = tdc;
+    }
   }
   patch.integrationConfig = ic;
   repo.update('projects', p.id, patch);
@@ -450,6 +574,10 @@ route('POST', '/api/projects/:id/connection/secrets', (ctx) => {
   const httpRef = sfRef ? `HTTP_${sfRef}_` : 'HTTP_';
   if (http.token) pairs[`${httpRef}TOKEN`] = http.token;
   if (http.baseUrl) pairs[`${httpRef}BASE_URL`] = http.baseUrl;
+  const playwright = b.playwright || {};
+  const pwRef = sfRef ? `PLAYWRIGHT_${sfRef}_` : 'PLAYWRIGHT_';
+  if (playwright.mcpUrl) pairs[`${pwRef}MCP_URL`] = playwright.mcpUrl;
+  if (playwright.mcpCommand) pairs[`${pwRef}MCP_COMMAND`] = playwright.mcpCommand;
   if (b.cursor && b.cursor.apiKey) {
     throw new HttpError(400, 'Cursor does not use an API key here. Click Connect to log in with the Cursor CLI.');
   }
@@ -478,6 +606,30 @@ function sanitizeDocInput(b) {
   if (looksLikeSecretText(body)) throw new HttpError(400, 'The document looks like it contains secrets and was not stored.', { action: 'Remove API keys, tokens and passwords, then paste again.' });
   return { name, body, filePath: filePath ? safeLocalPath(filePath) : null };
 }
+
+route('POST', '/api/projects/:id/environment-import', (ctx) => {
+  const p = getProject(ctx.params.id);
+  const b = ctx.body || {};
+  const raw = b.environment !== undefined ? b.environment : b;
+  const overwrite = b.overwrite === true || ctx.query.overwrite === 'true';
+  try {
+    const loopback = isLoopback(ctx) && (config.host === '127.0.0.1' || config.host === 'localhost');
+    const result = applyEnvironmentToProject(p, raw, { user: ctx.user, fillEmptyOnly: !overwrite, loopback });
+    return {
+      ok: true,
+      environment: result.environment,
+      project: projectView(result.project),
+      applied: result.applied,
+      credentials: result.credentials,
+      secretsSkipped: [],
+      skippedKeys: [],
+      variables: result.variables,
+      notice: `Imported environment “${result.environment.name}”. ${result.applied.join('; ') || 'Connections updated'}.`,
+    };
+  } catch (e) {
+    throw new HttpError(400, e.message, { action: 'Export a Postman environment JSON ({ name, values }).' });
+  }
+});
 
 route('GET', '/api/projects/:id/context-docs', (ctx) => {
   const p = getProject(ctx.params.id);
@@ -602,4 +754,4 @@ route('GET', '/api/audit', (ctx) => {
   return paginate('audit_log', ctx, { where, params, sortable: ['ts', 'category', 'user'], defaultSort: 'ts' });
 });
 
-module.exports = { projectView, describeCache };
+module.exports = { projectView, describeCache, validateProject };

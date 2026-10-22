@@ -34,15 +34,16 @@ SF_ACME_QA_CLIENT_SECRET=…
 JIRA_EMAIL=…            JIRA_API_TOKEN=…
 ```
 
-The left sidebar **QA workflow** is the primary path: Project Setup → Jira Requirement → Salesforce Connection → API Discovery → Postman Collection → Test Generation → Review → Approval → Execution → Salesforce Validation → Results → Jira Defects → Reports. Each step shows whether it is pending, running, complete, failed, blocked, or waiting for approval. Returning to a project restores the last step.
+The left sidebar **How QA works** is four stages: **Connect → Create tests → Run → Report**. Jira, Salesforce, HTTP/Postman, review, Salesforce data checks and defects live inside those stages. Each stage shows pending, running, complete, failed, blocked, or waiting for approval. Returning to a project restores the last stage.
 
 Open **Projects → Connections** (or **New project**) and connect:
 
 1. **Salesforce org** — instance URL, API version, credential prefix, plus optional **MCP** (HTTP URL or stdio command such as `npx -y @salesforce/mcp`). MCP is used for live describe/SOQL; running tests still needs org OAuth (`client_credentials`, JWT or refresh token).
 2. **Jira** — site URL and project key. **Sync tickets and generate API scripts** pulls issues by JQL and proposes executable tests for tickets that need API coverage. Review each proposal before approve; nothing is posted to Jira unless you opt in.
 3. **Postman** — MCP URL/command and workspace. Existing collections are searched and reused before a new one is created; collection updates need approval.
-4. **Commerce Cloud** — optional. Enable OCAPI/SCAPI testing, set host, site ID, org ID and short code. Secrets use `SFCC_<PREFIX>_CLIENT_ID` / `_CLIENT_SECRET` (SLAS or OCAPI).
-5. **Salesforce CLI** — optional fallback for metadata (`sf org display` / describe / SOQL) when MCP is not connected. Enable it on the Salesforce workflow step.
+4. **Playwright MCP** — optional API-testing runner (`npx -y @executeautomation/playwright-mcp-server`). Pick Playwright, Postman, or the platform runner each time you start a run. Official Microsoft Playwright MCP is browser-only; this uses ExecuteAutomation’s HTTP tools.
+5. **Commerce Cloud** — optional. Enable OCAPI/SCAPI testing, set host, site ID, org ID and short code. Secrets use `SFCC_<PREFIX>_CLIENT_ID` / `_CLIENT_SECRET` (SLAS or OCAPI).
+6. **Salesforce CLI** — optional fallback for metadata (`sf org display` / describe / SOQL) when MCP is not connected. Enable it on the Salesforce workflow step.
 
 When this server is bound to loopback, Connections can write those variables into local `.env` (they are never stored in the database or returned to the browser). Otherwise set them in `.env` or your secret manager and restart.
 
@@ -53,7 +54,7 @@ When Salesforce is not reachable or not configured, the platform says so explici
 1. **Stories** — sync from Jira (JQL) or add manually. Every story is automatically classified (needs API testing: yes/no, with confidence and reasons) so you don't spend review time on UI-only or documentation tickets; the classification is always labelled ASSUMED and is advisory, not a hard block — "Analyze anyway" is one click away.
 2. **Generate** — the engine detects objects, fields, operations and integrations, reads metadata (live describe = VERIFIED, simulator or heuristics = ASSUMED), and proposes scenarios with P0–P3 priorities scored on seven factors.
 3. **Review and approve** — choose which tests to keep. Posting a coverage comment to Jira is a separate, explicit opt-in.
-4. **Execute** — runs in the background; the run ribbon fills cell by cell over server-sent events. Upstream setup tests that produce required variables are pulled in automatically; created records are cleaned up afterwards (never in Production).
+4. **Execute** — pick Playwright MCP, Postman MCP, or the platform runner, then run. The ribbon fills cell by cell over server-sent events. Upstream setup tests that produce required variables are pulled in automatically; created records are cleaned up afterwards (never in Production).
 5. **Validate** — each write is re-read from Salesforce and compared field by field with what was sent.
 6. **Analyse and raise defects** — failures are categorised with root cause, evidence and recommended action. A defect is created only after you review the masked preview and click **Create Jira defect**; it is then linked to the story and its key stored on the result.
 7. **Report and automate** — export reports, Postman collections and environments, and run the suite in CI.

@@ -120,8 +120,11 @@
   function analysisView(a, err) {
     if (!a && !err) return empty({ icon: 'spark', title: 'No analysis', text: 'Analysis is produced for failed and blocked tests.' });
     const x = a || {};
+    const href = x.href || (err && err.href);
+    const actionLabel = x.actionLabel || (err && err.actionLabel) || 'Open Connections';
     return h`<div class="row wrap" style="gap:8px;margin-bottom:10px"><b>${x.category || (err && err.title) || 'Failure'}</b>${prov(x.label)}${x.confidence ? h`<span class="tag">confidence: ${x.confidence}</span>` : ''}</div>
-      ${kv([['Classification', x.classification], ['Failure', x.failure], ['Root cause', x.rootCause || (err && err.cause)], ['Evidence', (x.evidence || (err && err.evidence) || []).length ? h`<ul class="list">${[].concat(x.evidence || err.evidence).map((e) => h`<li class="small">${e}</li>`)}</ul>` : null], ['Impact', x.impact], ['Recommendation', x.recommendation || x.action || (err && err.action)], ['Retest', x.retest]])}`;
+      ${kv([['Classification', x.classification], ['Failure', x.failure], ['Root cause', x.rootCause || (err && err.cause)], ['Evidence', (x.evidence || (err && err.evidence) || []).length ? h`<ul class="list">${[].concat(x.evidence || err.evidence).map((e) => h`<li class="small">${e}</li>`)}</ul>` : null], ['Impact', x.impact], ['Recommendation', x.recommendation || x.action || (err && err.action)], ['Retest', x.retest]])}
+      ${href ? h`<div class="form-actions mt"><a class="btn primary" href="${href}" data-link>${actionLabel}</a></div>` : ''}`;
   }
 
   /** Tabs for a single exchange. Returns { html, bind(el) }. */
@@ -281,6 +284,24 @@
     });
   }
 
+  function runnerPicker(p) {
+    const runners = (p && p.connection && p.connection.runners) || {};
+    const rows = [
+      ['platform', 'Platform', 'Built-in runner. Always available. Masking, retries and Salesforce checks stay on.'],
+      ['playwright', 'Playwright MCP', runners.playwright && runners.playwright.available ? 'ExecuteAutomation Playwright MCP (playwright_get / post / put / patch / delete).' : 'Not connected — set it on Connections → Playwright MCP.'],
+      ['postman', 'Postman MCP', runners.postman && runners.postman.available ? 'Runs the synced collection in Postman.' : 'Not connected — set it on Connections → Postman / HTTP.'],
+    ];
+    const preferred = (runners.playwright && runners.playwright.available) ? 'playwright'
+      : (runners.postman && runners.postman.available) ? 'postman' : 'platform';
+    return h`<div class="field"><span>How should this run execute?</span>
+      <select class="select" name="executor">${rows.map(([id, label, help]) => {
+        const avail = id === 'platform' || (runners[id] && runners[id].available);
+        return h`<option value="${id}" ${id === preferred ? 'selected' : ''} ${avail ? '' : 'disabled'}>${label}${avail ? '' : ' (connect first)'}</option>`;
+      })}</select>
+      <small>${rows.find((r) => r[0] === preferred)[2]} <a href="/projects/${p.id}?tab=connection" data-link>Connections</a></small>
+    </div>`;
+  }
+
   /** Dialog to pick a run selection (priority / type / story) and start it. */
   function runDialog({ preset = {}, title = 'Run tests' } = {}) {
     const m = QA.state.meta;
@@ -293,7 +314,9 @@
         <label class="field"><span>Story keys (comma separated, optional)</span><input class="input" name="storyKey" value="${[].concat(preset.storyKey || []).join(', ')}" placeholder="e.g. DEMO-101, DEMO-102"></label>
         <label class="field"><span>Run label</span><input class="input" name="label" value="${preset.label || ''}" placeholder="e.g. Sprint 24 regression"></label>
         <label class="check-row"><input type="checkbox" name="deps" checked> Include upstream setup tests that produce required variables</label>
-        <p class="small muted">Empty filters run every ready test in the project. Drafts and disabled tests are skipped. When Postman MCP is connected, the run executes in Postman; otherwise the platform runner is used.</p></div>`,
+        <label class="check-row"><input type="checkbox" name="postResultToJira" ${preset.postResultToJira ? 'checked' : ''}> After the run, post a pass/fail comment on the Jira story (not a defect)</label>
+        ${runnerPicker(p)}
+        <p class="small muted">Empty filters run every ready test. Drafts and disabled tests are skipped. Production writes still need confirmation.</p></div>`,
       foot: h`<button class="btn" data-close>Cancel</button><button class="btn primary" data-go>${ic('play')} Start run</button>`,
       onMount(el, close) {
         const sel = { priority: new Set([].concat(preset.priority || [])), testType: new Set([].concat(preset.testType || [])) };
@@ -304,7 +327,9 @@
           if (sel.priority.size) filter.priority = [...sel.priority];
           if (sel.testType.size) filter.testType = [...sel.testType];
           if (sk.length) filter.storyKey = sk;
-          const run = await startRun({ filter, label: el.querySelector('[name=label]').value || undefined, resolveDependencies: el.querySelector('[name=deps]').checked, testCaseIds: preset.testCaseIds }, e.currentTarget);
+          const execEl = el.querySelector('[name=executor]');
+          const postResult = el.querySelector('[name=postResultToJira]') && el.querySelector('[name=postResultToJira]').checked;
+          const run = await startRun({ filter, label: el.querySelector('[name=label]').value || undefined, resolveDependencies: el.querySelector('[name=deps]').checked, testCaseIds: preset.testCaseIds, executor: execEl ? execEl.value : 'auto', postResultToJira: postResult }, e.currentTarget);
           if (run) close();
         });
       },

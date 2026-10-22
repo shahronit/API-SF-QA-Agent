@@ -5,7 +5,7 @@
  * HTTP_<PREFIX>_TOKEN in the environment — never from the UI or DB.
  */
 const { httpCredentials } = require('../config');
-const { explainResponse, explainNetworkError } = require('../lib/errors');
+const { explainNetworkError } = require('../lib/errors');
 const { ConnectorError } = require('./salesforce');
 
 const CORRELATION_HEADERS = ['x-correlation-id', 'x-request-id', 'x-b3-traceid', 'traceparent', 'x-amzn-trace-id'];
@@ -27,12 +27,32 @@ class HttpConnector {
     return Boolean(this.baseUrl);
   }
 
+  missingHref() {
+    const id = this.project && this.project.id;
+    return id ? `/projects/${id}?tab=connection&focus=http` : '/projects';
+  }
+
   unavailableExplanation() {
     return {
       code: 'HTTP_BASE_URL_MISSING',
       title: 'Frontend HTTP base URL is not set.',
-      cause: 'This test is a custom REST / BFF / middleware call, not a Salesforce org API.',
-      action: 'On Connections → Postman / HTTP, set the frontend base URL, or put an absolute https URL on the test case.',
+      cause: 'This test is a custom REST / BFF / middleware call, not a Salesforce org API. The collection did not include a usable origin.',
+      action: 'Set the frontend base URL (and bearer token if the API needs one) on Connections → Postman / HTTP.',
+      actionLabel: 'Set HTTP base URL',
+      href: this.missingHref(),
+      category: 'configuration',
+      evidence: [],
+    };
+  }
+
+  tokenMissingExplanation() {
+    return {
+      code: 'HTTP_TOKEN_MISSING',
+      title: 'Frontend HTTP bearer token is not set.',
+      cause: 'This collection uses Bearer / OAuth on the frontend API. Tokens are never stored in the database — they live in .env.',
+      action: 'On Connections → Postman / HTTP, paste the bearer token (loopback writes HTTP_<PREFIX>_TOKEN to local .env).',
+      actionLabel: 'Add bearer token',
+      href: this.missingHref(),
       category: 'configuration',
       evidence: [],
     };
@@ -53,9 +73,8 @@ class HttpConnector {
       headers.Authorization = `Bearer ${this.creds.token}`;
     } else if (auth === 'invalid') {
       headers.Authorization = 'Bearer INVALID.HTTP.TOKEN';
-    } else if (auth === 'none') {
-      delete headers.Authorization;
     }
+    // auth === 'none' keeps a caller-supplied Authorization (Bearer / Basic / OAuth helpers).
     const origin = this.originFor(r.path);
     const target = /^https?:\/\//i.test(r.path)
       ? new URL(r.path)
@@ -74,30 +93,33 @@ class HttpConnector {
     }
 
     const started = performance.now();
+    const { request: transportRequest, httpSettings } = require('../lib/http-transport');
+    const cookies = require('../engine/cookie-jar');
     let res;
     try {
-      res = await fetch(target, {
-        method: r.method, headers, body: payload,
-        signal: AbortSignal.timeout(r.timeoutMs || 30000), redirect: 'manual',
+      res = await transportRequest({
+        method: r.method, url: target.toString(), headers, body: payload,
+        timeoutMs: r.timeoutMs || 30000,
+        settings: httpSettings(this.project),
+        cookieJar: this.project && this.project.id ? cookies.jarFor(this.project.id) : null,
+        followRedirects: r.followRedirects !== false,
       });
     } catch (e) {
-      const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+      const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError' || e.code === 'TIMEOUT');
       const err = new ConnectorError(explainNetworkError(isTimeout ? { code: 'TIMEOUT', message: `No response within ${r.timeoutMs || 30000} ms` } : e, target.toString()));
-      err.timeMs = Math.round(performance.now() - started);
+      err.timeMs = e.timeMs || Math.round(performance.now() - started);
       err.url = target.toString();
       throw err;
     }
-    const text = await res.text();
-    const resHeaders = Object.fromEntries(res.headers.entries());
-    let body = text;
-    if ((resHeaders['content-type'] || '').includes('json') && text) {
-      try { body = JSON.parse(text); } catch { /* keep text */ }
-    }
-    const correlationId = CORRELATION_HEADERS.map((h) => resHeaders[h]).find(Boolean) || null;
+    const resHeaders = res.headers || {};
+    const correlationId = CORRELATION_HEADERS.map((h) => {
+      const k = Object.keys(resHeaders).find((x) => x.toLowerCase() === h);
+      return k ? resHeaders[k] : null;
+    }).find(Boolean) || null;
     return {
-      status: res.status, statusText: res.statusText, headers: resHeaders, body, text,
-      timeMs: Math.round(performance.now() - started), sizeBytes: Buffer.byteLength(text),
-      url: target.toString(), correlationId, requestHeaders: headers, requestBody: payload,
+      status: res.status, statusText: res.statusText, headers: resHeaders, body: res.body, text: res.text,
+      timeMs: res.timeMs, sizeBytes: res.sizeBytes,
+      url: res.url || target.toString(), correlationId, requestHeaders: res.requestHeaders || headers, requestBody: payload,
     };
   }
 
