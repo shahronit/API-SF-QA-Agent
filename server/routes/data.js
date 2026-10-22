@@ -8,27 +8,23 @@ const { buildPayload } = require('../engine/generator');
 const contracts = require('../engine/contracts');
 const { isProduction } = require('../engine/safety');
 const { maskDeep } = require('../lib/mask');
-const { projectFrom, getProject, paginate, inFilter, likeFilter } = require('./util');
+const { projectFrom, paginate, inFilter, likeFilter } = require('./util');
 
-const CATEGORIES = ['Positive', 'Negative', 'Boundary', 'Integration', 'Regression', 'Performance'];
+// Test-data categories mirror the plan: positive, negative, boundary, security, integration, bulk, regression (+ performance).
+const CATEGORIES = ['Positive', 'Negative', 'Boundary', 'Security', 'Integration', 'Bulk', 'Regression', 'Performance'];
+const { parse: parseCsvText } = require('../lib/csv');
+const parseCsv = (text) => parseCsvText(text).records;
 
-function parseCsv(text) {
-  const rows = [];
-  let row = []; let cell = ''; let q = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (q) {
-      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') q = false; else cell += ch;
-    } else if (ch === '"') q = true;
-    else if (ch === ',') { row.push(cell); cell = ''; }
-    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
-    else cell += ch;
-  }
-  if (cell || row.length) { row.push(cell); rows.push(row); }
-  const [head, ...body] = rows.filter((r) => r.some((c) => c.trim() !== ''));
-  if (!head) return [];
-  return body.map((r) => Object.fromEntries(head.map((h, i) => [h.trim(), r[i] === undefined ? '' : r[i]])));
-}
+// Hostile-but-harmless strings: Salesforce must store them as literal data (or reject them) — never interpret them.
+const SECURITY_STRINGS = [
+  ["SOQL injection probe", "x' OR Name != '"],
+  ['Script tag (stored XSS probe)', '<script>alert(1)</script>'],
+  ['HTML attribute breakout', '"><img src=x onerror=alert(1)>'],
+  ['Formula injection probe', '=HYPERLINK("http://example.invalid","x")'],
+  ['Path traversal probe', '../../etc/passwd'],
+  ['Unicode / RTL override', 'QA \u202Etest\u202C \u00e9\u4e2d\u6587'],
+  ['Null byte probe', 'QA\u0000value'],
+];
 
 // ── Test data ──
 route('GET', '/api/testdata', (ctx) => {
@@ -89,6 +85,14 @@ route('POST', '/api/testdata/generate', async (ctx) => {
     } else if (cat === 'Boundary' && str) {
       payload = { ...payload, [str.name]: i % 2 ? `{{$randomString:${str.length + 1}}}` : `{{$randomString:${str.length}}}` };
       note = i % 2 ? `${str.name} length ${str.length + 1} → expect STRING_TOO_LONG.` : `${str.name} at max length ${str.length}.`;
+    } else if (cat === 'Security' && str) {
+      const [label, probe] = SECURITY_STRINGS[i % SECURITY_STRINGS.length];
+      payload = { ...payload, [str.name]: probe.slice(0, str.length || 255) };
+      note = `${label} in ${str.name}: expect the value to be stored verbatim (or rejected with 400) and never executed. Verify by reading the record back.`;
+    } else if (cat === 'Bulk') {
+      const cols = Object.keys(payload).filter((k) => !/\{\{\w+Id\}\}/.test(String(payload[k])));
+      payload = { records: 500, columns: cols, template: Object.fromEntries(cols.map((k) => [k, payload[k]])) };
+      note = `CSV template for a Bulk API 2.0 ingest job (${cols.join(', ')}); make unique/external-id columns unique per row with {{runId}}.`;
     } else if (cat === 'Performance') {
       note = 'Use with composite collections (≤200 records per call).';
     }
@@ -205,11 +209,40 @@ route('GET', '/api/requests', (ctx) => {
 route('POST', '/api/requests', (ctx) => {
   const p = projectFrom(ctx);
   required(ctx.body, ['name', 'method', 'path']);
-  if (Object.keys(ctx.body.headers || {}).some((h) => /^authorization$/i.test(h))) throw new HttpError(400, 'Saved requests cannot contain Authorization headers.');
-  const r = { id: crypto.randomUUID(), projectId: p.id, name: ctx.body.name, collection: ctx.body.collection || 'Default', apiType: ctx.body.apiType || 'REST', method: String(ctx.body.method).toUpperCase(), path: ctx.body.path, headers: ctx.body.headers || {}, query: ctx.body.query || {}, body: ctx.body.body === undefined ? null : ctx.body.body, auth: ctx.body.auth || 'default', createdAt: now() };
+  const extra = ctx.body.extra || {
+    bodyMode: ctx.body.bodyMode,
+    authConfig: ctx.body.authConfig,
+    preRequest: ctx.body.preRequest,
+    tests: ctx.body.tests,
+    folder: ctx.body.folder,
+    queryRows: ctx.body.queryRows,
+    headerRows: ctx.body.headerRows,
+    form: ctx.body.form,
+    graphql: ctx.body.graphql,
+    protocol: ctx.body.protocol,
+  };
+  const r = {
+    id: crypto.randomUUID(), projectId: p.id, name: ctx.body.name,
+    collection: ctx.body.collection || 'Default', apiType: ctx.body.apiType || 'REST',
+    method: String(ctx.body.method).toUpperCase(), path: ctx.body.path,
+    headers: ctx.body.headers || {}, query: ctx.body.query || {},
+    body: ctx.body.body === undefined ? null : ctx.body.body,
+    auth: ctx.body.auth || 'default', extra, createdAt: now(),
+  };
   repo.insert('saved_requests', r);
   audit('explorer', 'request.saved', { user: ctx.user, projectId: p.id, detail: { name: r.name } });
   return r;
+});
+
+route('PUT', '/api/requests/:id', (ctx) => {
+  const r = repo.get('saved_requests', ctx.params.id);
+  if (!r) throw new HttpError(404, `Saved request ${ctx.params.id} not found.`);
+  const patch = {};
+  for (const k of ['name', 'collection', 'apiType', 'method', 'path', 'headers', 'query', 'body', 'auth', 'extra']) {
+    if (ctx.body[k] !== undefined) patch[k] = k === 'method' ? String(ctx.body[k]).toUpperCase() : ctx.body[k];
+  }
+  repo.update('saved_requests', r.id, patch);
+  return { ...r, ...patch };
 });
 
 route('DELETE', '/api/requests/:id', (ctx) => {

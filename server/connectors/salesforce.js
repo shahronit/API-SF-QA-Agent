@@ -9,6 +9,7 @@ const path = require('node:path');
 const { salesforceCredentials, config } = require('../config');
 const { signRS256 } = require('../lib/jwt');
 const { explainResponse, explainNetworkError } = require('../lib/errors');
+const { restApiOrigin, ensureSalesforceRestPath } = require('./salesforce-org');
 
 const tokenCache = new Map(); // key -> { accessToken, instanceUrl, expiresAt }
 
@@ -111,22 +112,33 @@ class SalesforceConnector {
    */
   async request(r) {
     const auth = r.auth || 'default';
-    let instanceUrl = (this.project.instanceUrl || '').replace(/\/$/, '');
-    const headers = { Accept: 'application/json', ...(r.headers || {}) };
+    let instanceUrl = restApiOrigin(this.project.instanceUrl) || String(this.project.instanceUrl || '').replace(/\/$/, '');
+    const headers = { Accept: 'application/json', 'Accept-Encoding': 'identity', ...(r.headers || {}) };
     if (auth === 'default' || auth === 'lowpriv') {
       const t = await this.token(auth === 'lowpriv' ? 'lowpriv' : 'default');
-      instanceUrl = t.instanceUrl || instanceUrl;
+      instanceUrl = restApiOrigin(t.instanceUrl) || t.instanceUrl || instanceUrl;
       headers.Authorization = `Bearer ${t.accessToken}`;
     } else if (auth === 'invalid') {
       headers.Authorization = 'Bearer 00DINVALIDTOKEN!QA.NegativeTest.InvalidToken';
-    } else {
-      delete headers.Authorization;
+    }
+    // auth === 'none' (and helper-applied Bearer/Basic) keeps caller Authorization.
+    if (!instanceUrl) {
+      throw new ConnectorError({
+        code: 'SF_INSTANCE_MISSING',
+        title: 'No Salesforce API host is set.',
+        cause: 'The login URL (login.salesforce.com / Lightning) is not a REST API host and returns HTTP 403/410.',
+        action: 'Log in, then Test — we save the org’s *.my.salesforce.com instance URL for API calls.',
+        category: 'configuration',
+        evidence: [],
+      });
     }
     if (r.apiType === 'SOAP' && headers.Authorization && r.bodyRaw && r.bodyRaw.includes('{{sessionId}}')) {
       r.bodyRaw = r.bodyRaw.replace(/\{\{sessionId\}\}/g, headers.Authorization.replace('Bearer ', ''));
     }
-    const target = /^https?:\/\//.test(r.path) ? new URL(r.path) : new URL(instanceUrl + (r.path.startsWith('/') ? '' : '/') + r.path);
-    if (/^https?:\/\//.test(r.path) && new URL(instanceUrl).host !== target.host && headers.Authorization && auth !== 'invalid') {
+    const path = r.apiType === 'SOAP' || r.apiType === 'HTTP' ? (r.path || '/') : ensureSalesforceRestPath(r.path, this.project.apiVersion);
+    const target = /^https?:\/\//.test(path) ? new URL(path) : new URL(instanceUrl + (path.startsWith('/') ? '' : '/') + path);
+    const apiHost = (() => { try { return new URL(instanceUrl).host; } catch { return ''; } })();
+    if (apiHost && target.host !== apiHost && headers.Authorization && auth !== 'invalid') {
       // Never forward a Salesforce token to a foreign host.
       delete headers.Authorization;
     }
@@ -194,6 +206,23 @@ class SalesforceConnector {
     return this.ensureOk(res, 'SOQL query failed');
   }
 
+  async queryTooling(soql) {
+    const res = await this.request({ method: 'GET', path: `${this.v()}/tooling/query`, query: { q: soql } });
+    return this.ensureOk(res, 'Tooling query failed');
+  }
+
+  async orgDisplay() {
+    const { sanitizeOrgDisplay } = require('./salesforce-org');
+    const res = await this.request({ method: 'GET', path: '/services/oauth2/userinfo' });
+    const body = await this.ensureOk(res, 'Identity (userinfo) failed');
+    return sanitizeOrgDisplay({
+      username: body.preferred_username || body.username,
+      orgId: body.organization_id,
+      instanceUrl: body.urls && body.urls.custom_domain ? String(body.urls.custom_domain).replace(/\/$/, '') : this.project.instanceUrl,
+      status: 'Connected',
+    });
+  }
+
   async limits() {
     const res = await this.request({ method: 'GET', path: `${this.v()}/limits` });
     return this.ensureOk(res, 'limits failed');
@@ -208,6 +237,15 @@ class SalesforceConnector {
   }
 }
 
+/** CLI/REST describe may return picklists as strings or `{ value, active }` objects. */
+function picklistStrings(values) {
+  return (values || []).map((p) => {
+    if (typeof p === 'string') return p;
+    if (!p || p.active === false) return null;
+    return p.value || p.label || null;
+  }).filter((v) => typeof v === 'string' && v);
+}
+
 function normaliseDescribe(d) {
   return {
     name: d.name, label: d.label, keyPrefix: d.keyPrefix, custom: d.custom,
@@ -218,7 +256,7 @@ function normaliseDescribe(d) {
       unique: f.unique, externalId: f.externalId, calculated: f.calculated, custom: f.custom,
       required: f.createable && !f.nillable && !f.defaultedOnCreate,
       referenceTo: f.referenceTo, relationshipName: f.relationshipName,
-      picklistValues: (f.picklistValues || []).filter((p) => p.active).map((p) => p.value),
+      picklistValues: picklistStrings(f.picklistValues),
       restrictedPicklist: f.restrictedPicklist,
     })),
     childRelationships: (d.childRelationships || []).filter((c) => c.relationshipName).slice(0, 60).map((c) => ({ childSObject: c.childSObject, field: c.field, relationshipName: c.relationshipName })),
@@ -226,4 +264,4 @@ function normaliseDescribe(d) {
   };
 }
 
-module.exports = { SalesforceConnector, ConnectorError, normaliseDescribe };
+module.exports = { SalesforceConnector, ConnectorError, normaliseDescribe, picklistStrings };

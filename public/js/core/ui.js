@@ -24,7 +24,6 @@
   // ── Formatting ──
   const fmt = {
     num: (n) => (n === null || n === undefined || Number.isNaN(n) ? '–' : Number(n).toLocaleString()),
-    pct: (n) => (n === null || n === undefined ? '–' : `${Number(n).toFixed(Number(n) % 1 ? 1 : 0)}%`),
     ms: (n) => (n === null || n === undefined ? '–' : n >= 1000 ? `${(n / 1000).toFixed(2)} s` : `${Math.round(n)} ms`),
     bytes: (n) => (n === null || n === undefined ? '–' : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n > 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`),
     date: (s) => (s ? new Date(s).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '–'),
@@ -164,12 +163,15 @@
 
   // ── States ──
   const loading = (rows = 6) => h`<div class="card-body">${Array.from({ length: rows }, (_, i) => h`<div class="skeleton sk-line" style="width:${90 - (i % 3) * 18}%"></div>`)}</div>`;
-  const empty = ({ icon: i = 'inbox', title, text, action }) => h`<div class="empty">${ic(i)}<h3>${title}</h3>${text ? h`<p>${text}</p>` : ''}${action || ''}</div>`;
+  const empty = ({ icon: i = 'inbox', title, text, action }) => h`<div class="empty">${ic(i)}<h3>${title}</h3>${text ? h`<p>${text}</p>` : ''}${action ? h`<div class="form-actions">${action}</div>` : ''}</div>`;
   /** Actionable error state built from an ApiError: error, cause, evidence, action. */
   function errorBox(err, { compact = false } = {}) {
-    const i = (err && err.info) || {};
-    return h`<div class="callout error" role="alert">${ic('alert')}<div><b>${err.message || i.title || 'The request failed'}</b>
-      ${!compact ? h`<dl>${i.cause ? h`<dt>Possible cause</dt><dd>${i.cause}</dd>` : ''}${i.evidence && i.evidence.length ? h`<dt>Evidence</dt><dd>${[].concat(i.evidence).join(' · ')}</dd>` : ''}${i.action ? h`<dt>Recommended action</dt><dd>${i.action}</dd>` : ''}</dl>` : i.action ? h`<div class="small mt-s">${i.action}</div>` : ''}</div></div>`;
+    const i = (err && err.info) || err || {};
+    const href = i.href || err.href;
+    const actionLabel = i.actionLabel || err.actionLabel || 'Open Connections';
+    return h`<div class="callout error" role="alert">${ic('alert')}<div><b>${err.message || i.title || err.title || 'The request failed'}</b>
+      ${!compact ? h`<dl>${i.cause || err.cause ? h`<dt>Possible cause</dt><dd>${i.cause || err.cause}</dd>` : ''}${((i.evidence || err.evidence) && (i.evidence || err.evidence).length) ? h`<dt>Evidence</dt><dd>${[].concat(i.evidence || err.evidence).join(' · ')}</dd>` : ''}${(i.action || err.action) ? h`<dt>Recommended action</dt><dd>${i.action || err.action}</dd>` : ''}</dl>` : (i.action || err.action) ? h`<div class="small mt-s">${i.action || err.action}</div>` : ''}
+      ${href ? h`<div class="form-actions mt"><a class="btn primary" href="${href}" data-link>${actionLabel}</a></div>` : ''}</div></div>`;
   }
 
   // ── JSON viewer with syntax highlight ──
@@ -217,9 +219,5 @@
       <button class="btn sm" data-page="${page.page + 1}" ${page.page >= page.pages ? 'disabled' : ''}>Next</button></div></div>`;
   }
 
-  function copyText(text) {
-    if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard', 'ok'), () => toast('Clipboard is not available in this browser context.', 'warn'));
-  }
-
-  QA.ui = { h, raw, esc, ic, fmt, badge, prov, pri, method, toast, toastError, modal, confirm, drawer, on, debounce, withBusy, loading, empty, errorBox, json, table, pager, copyText, Safe };
+  QA.ui = { h, raw, esc, ic, fmt, badge, prov, pri, method, toast, toastError, modal, confirm, drawer, on, debounce, withBusy, loading, empty, errorBox, json, table, pager, Safe };
 })();

@@ -4,7 +4,7 @@
   const { h, ic, fmt, on, empty, toast, toastError, withBusy, esc, modal, confirm, json } = QA.ui;
   const C = QA.components;
   const api = QA.api;
-  const CATEGORIES = ['Positive', 'Negative', 'Boundary', 'Integration', 'Regression', 'Performance'];
+  const CATEGORIES = ['Positive', 'Negative', 'Boundary', 'Security', 'Integration', 'Bulk', 'Regression', 'Performance'];
 
   QA.pages.testdata = {
     render(view, ctx) {
@@ -12,8 +12,9 @@
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Test data' }]);
       const prod = p.environment === 'Production';
-      view.innerHTML = String(h`${C.pageHead('Test data', 'Reusable payloads by category. Records created during runs are tracked and cleaned up automatically outside Production.',
+      view.innerHTML = String(h`${C.pageHead('Test data', 'Reusable request payloads (positive, negative, boundary, and so on). Records created in a run are cleaned up automatically outside Production.',
         h`<button class="btn" data-act="cleanup" ${prod ? 'disabled title="Disabled in Production"' : ''}>${ic('trash')} Clean up run data</button><button class="btn" data-act="import">${ic('upload')} Import CSV/JSON</button><button class="btn" data-act="new">${ic('plus')} New dataset</button><button class="btn primary" data-act="generate">${ic('wand')} Generate</button>`)}
+        ${C.pageIntro({ what: 'Datasets tests can reuse as {{variables}}. They are not Salesforce records until a run creates them.', next: prod ? 'Production is read-only here — use payloads for verification only.' : 'Generate from an object describe, or import CSV/JSON. Clean up run data when a sandbox run left records behind.' })}
         ${prod ? h`<div class="callout error" style="margin-bottom:16px">${ic('shield')}<div class="small">Production: records are never created or deleted automatically. Use these payloads for read-only verification only.</div></div>` : ''}
         <div data-list></div>`);
       const list = C.listController(view.querySelector('[data-list]'), {

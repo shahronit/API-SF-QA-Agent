@@ -10,7 +10,8 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Contracts' }]);
-      view.innerHTML = String(h`${C.pageHead('API contracts', 'Validate responses against OpenAPI 3, Swagger 2 or JSON Schema: required fields, types, enums, formats, status codes and headers.', h`<button class="btn primary" data-act="upload">${ic('upload')} Upload contract</button>`)}
+      view.innerHTML = String(h`${C.pageHead('API contracts', 'Check responses against an OpenAPI, Swagger or JSON Schema file — required fields, types, enums and status codes.', h`<button class="btn primary" data-act="upload">${ic('upload')} Upload a contract</button>`)}
+        ${C.pageIntro({ what: 'Optional. Upload a spec so runs can flag responses that drift from the contract.', next: 'Upload an OpenAPI 3, Swagger 2 or JSON Schema file, then attach it when you review tests.' })}
         <div class="grid g-12"><div class="card" style="align-self:start" data-list>${loading(4)}</div><div data-detail>${'' }</div></div>`);
       let list = [];
       let current = null;
@@ -30,7 +31,7 @@
         detail.innerHTML = String(h`<div class="card">${loading(8)}</div>`);
         try {
           const c = await api.get(`/api/contracts/${id}`);
-          detail.innerHTML = String(h`<div class="card"><div class="card-head"><h2>${c.name} <span class="sub">${c.kind} · uploaded ${fmt.date(c.createdAt)}</span></h2><div class="row"><button class="btn sm" data-act="validate">${ic('check')} Validate latest run</button><button class="btn sm ghost" data-act="delete" aria-label="Delete contract">${ic('trash')}</button></div></div>
+          detail.innerHTML = String(h`<div class="card"><div class="card-head"><h2>${c.name} <span class="sub">${c.kind} · uploaded ${fmt.date(c.createdAt)}</span></h2><div class="row"><button class="btn sm" data-act="as-ep">${ic('code')} Import as endpoints</button><button class="btn sm" data-act="validate">${ic('check')} Validate latest run</button><button class="btn sm ghost" data-act="delete" aria-label="Delete contract">${ic('trash')}</button></div></div>
             ${QA.ui.table({ rows: c.operations, columns: [
               { key: 'method', label: 'Method', render: (o) => method(o.method) }, { key: 'path', label: 'Path', render: (o) => h`<code class="mono small">${o.path}</code>` },
               { key: 'summary', label: 'Summary', render: (o) => h`<span class="small">${o.summary}</span><div class="cell-sub mono">${o.id}</div>` }, { key: 'responses', label: 'Responses', render: (o) => h`${(o.responses || []).map((r) => h`<span class="tag">${r}</span>`)}` },
@@ -45,6 +46,12 @@
         } catch (e) { detail.innerHTML = String(errorBox(e)); }
       }
       on(listEl, 'click', '[data-c]', (e, el) => open(el.dataset.c));
+      on(detail, 'click', '[data-act=as-ep]', (e, el) => withBusy(el, async () => {
+        try {
+          const r = await api.post(`/api/projects/${p.id}/endpoints/from-openapi`, { contractId: current });
+          toast(`Imported ${r.added} of ${r.found} operations as project endpoints.`, 'ok');
+        } catch (err) { toastError(err, 'Import failed'); }
+      }));
       on(detail, 'click', '[data-act=validate]', (e, el) => withBusy(el, async () => {
         const out = detail.querySelector('[data-validation]');
         try {

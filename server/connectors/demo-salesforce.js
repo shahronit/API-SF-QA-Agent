@@ -12,6 +12,7 @@
  */
 const crypto = require('node:crypto');
 const { OBJECTS, LOW_PRIV, describe } = require('./demo-metadata');
+const csv = require('../lib/csv');
 
 const SUPPORTED_VERSIONS = ['58.0', '59.0', '60.0', '61.0', '62.0', '63.0', '64.0'];
 const stores = new Map(); // projectId -> { objects: {Obj: Map}, counters, idempotency, bulkJobs }
@@ -45,6 +46,90 @@ function sfError(status, errorCode, message, fields) {
   return { status, body: [{ message, errorCode, ...(fields ? { fields } : {}) }] };
 }
 
+// ── GraphQL document parser (queries only; enough of the spec for UI API) ──────
+class GqlError extends Error {
+  constructor(message, type = 'ValidationError') { super(message); this.type = type; }
+}
+
+function gqlTokens(src) {
+  const t = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s|,/.test(c)) { i++; continue; } // commas are insignificant
+    if (c === '#') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if ('{}()[]:!=$@'.includes(c)) { t.push({ k: c }); i++; continue; }
+    if (c === '"') {
+      let j = i + 1; let s = '';
+      while (j < src.length && src[j] !== '"') { if (src[j] === '\\') { s += src[j + 1]; j += 2; } else s += src[j++]; }
+      if (j >= src.length) throw new GqlError('Invalid Syntax : unterminated string', 'InvalidSyntax');
+      t.push({ k: 'str', v: s }); i = j + 1; continue;
+    }
+    const rest = src.slice(i, i + 40);
+    const num = rest.match(/^-?\d+(\.\d+)?/);
+    if (num) { t.push({ k: 'num', v: Number(num[0]) }); i += num[0].length; continue; }
+    const nm = rest.match(/^[A-Za-z_]\w*/);
+    if (nm) { t.push({ k: 'name', v: nm[0] }); i += nm[0].length; continue; }
+    throw new GqlError(`Invalid Syntax : offending token '${c}'`, 'InvalidSyntax');
+  }
+  return t;
+}
+
+function parseGql(src, provided) {
+  const t = gqlTokens(src);
+  let p = 0;
+  const vars = { ...provided };
+  const peek = () => t[p];
+  const next = () => t[p++];
+  const syntax = (msg) => new GqlError(`Invalid Syntax : ${msg}`, 'InvalidSyntax');
+  const show = (x) => (x ? (x.v !== undefined ? x.v : x.k) : 'end of document');
+  const expect = (k) => { const x = next(); if (!x || x.k !== k) throw syntax(`expected '${k}' but found '${show(x)}'`); return x; };
+  const value = () => {
+    const x = next();
+    if (!x) throw syntax('unexpected end of document');
+    if (x.k === '$') { const n = expect('name').v; if (!(n in vars)) throw new GqlError(`Variable '${n}' has not been provided`); return vars[n]; }
+    if (x.k === 'str' || x.k === 'num') return x.v;
+    if (x.k === 'name') return x.v === 'true' ? true : x.v === 'false' ? false : x.v === 'null' ? null : { enum: x.v };
+    if (x.k === '[') { const a = []; while (peek() && peek().k !== ']') a.push(value()); expect(']'); return a; }
+    if (x.k === '{') { const o = {}; while (peek() && peek().k !== '}') { const key = expect('name').v; expect(':'); o[key] = value(); } expect('}'); return o; }
+    throw syntax(`unexpected token '${show(x)}'`);
+  };
+  const selection = () => {
+    expect('{');
+    const fields = [];
+    while (peek() && peek().k !== '}') {
+      let name = expect('name').v; let alias = null;
+      if (peek() && peek().k === ':') { next(); alias = name; name = expect('name').v; }
+      const args = {};
+      if (peek() && peek().k === '(') { next(); while (peek() && peek().k !== ')') { const key = expect('name').v; expect(':'); args[key] = value(); } expect(')'); }
+      const sel = peek() && peek().k === '{' ? selection() : null;
+      fields.push({ name, alias: alias || name, args, selection: sel });
+    }
+    expect('}');
+    if (!fields.length) throw syntax('empty selection set');
+    return fields;
+  };
+  let operation = 'query';
+  if (peek() && peek().k === 'name' && ['query', 'mutation', 'subscription'].includes(peek().v)) {
+    operation = next().v;
+    if (peek() && peek().k === 'name') next(); // operation name
+    if (peek() && peek().k === '(') {
+      next();
+      while (peek() && peek().k !== ')') {
+        expect('$'); const n = expect('name').v; expect(':');
+        let required = false;
+        while (peek() && ['name', '[', ']', '!'].includes(peek().k)) { if (next().k === '!') required = true; }
+        if (peek() && peek().k === '=') { next(); const d = value(); if (!(n in vars)) vars[n] = d; }
+        else if (required && !(n in vars)) throw new GqlError(`Variable '${n}' has coerced Null value for NonNull type`);
+      }
+      expect(')');
+    }
+  }
+  const sel = selection();
+  if (p < t.length) throw syntax(`unexpected token '${show(t[p])}'`);
+  return { operation, selection: sel };
+}
+
 class DemoSalesforce {
   constructor(project) {
     this.project = project;
@@ -56,7 +141,7 @@ class DemoSalesforce {
   }
 
   seedStore() {
-    const s = { objects: {}, counters: {}, idempotency: new Map(), bulkJobs: new Map() };
+    const s = { objects: {}, counters: {}, idempotency: new Map(), bulkJobs: new Map(), cursors: new Map() };
     for (const name of Object.keys(OBJECTS)) s.objects[name] = new Map();
     this.store = s;
     const acme = this.insert('Account', { Name: 'Acme Corporation', AccountNumber: 'ACC-1001', Type: 'Customer - Direct', Industry: 'Manufacturing', Rating: 'Warm', External_Id__c: 'ERP-ACC-1001', Customer_Status__c: 'Active', BillingCity: 'Chicago', BillingCountry: 'USA', AnnualRevenue: 25000000 });
@@ -179,7 +264,7 @@ class DemoSalesforce {
   }
 
   // ── SOQL subset ───────────────────────────────────────────────────────────
-  soql(q, lowpriv) {
+  soql(q, lowpriv, opts = {}) {
     const m = String(q).trim().match(/^SELECT\s+([\s\S]+?)\s+FROM\s+(\w+)(?:\s+WHERE\s+([\s\S]+?))?(?:\s+ORDER\s+BY\s+(\w+(?:\.\w+)?)(?:\s+(ASC|DESC))?)?(?:\s+LIMIT\s+(\d+))?\s*$/i);
     if (!m) return sfError(400, 'MALFORMED_QUERY', `unexpected token in query: ${String(q).slice(0, 60)}`);
     const [, fieldList, objRaw, where, orderBy, dir, limit] = m;
@@ -202,7 +287,7 @@ class DemoSalesforce {
     if (where) {
       const conds = where.split(/\s+AND\s+/i);
       for (const c of conds) {
-        const cm = c.trim().match(/^(\w+)\s*(=|!=|<|>|LIKE|IN)\s*(.+)$/i);
+        const cm = c.trim().match(/^(\w+)\s*(<=|>=|!=|=|<|>|LIKE|IN)\s*(.+)$/i);
         if (!cm) return sfError(400, 'MALFORMED_QUERY', `unexpected token: ${c.slice(0, 40)}`);
         const [, fld, opRaw, valRaw] = cm;
         const fm = meta.fields.find((x) => x.name.toLowerCase() === fld.toLowerCase());
@@ -221,6 +306,8 @@ class DemoSalesforce {
             if (op === '!=') return rv !== v;
             if (op === '<') return rv !== null && rv < v;
             if (op === '>') return rv !== null && rv > v;
+            if (op === '<=') return rv !== null && rv <= v;
+            if (op === '>=') return rv !== null && rv >= v;
             if (op === 'LIKE') { const rx = new RegExp('^' + String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.') + '$', 'i'); return rv !== null && rx.test(String(rv)); }
             return false;
           });
@@ -228,8 +315,9 @@ class DemoSalesforce {
       }
     }
     if (orderBy) rows.sort((a, b) => (a[orderBy] > b[orderBy] ? 1 : -1) * (dir && dir.toUpperCase() === 'DESC' ? -1 : 1));
-    const totalSize = rows.length;
+    // totalSize is the number of rows the query returns in total (after LIMIT), across all batches.
     if (limit) rows = rows.slice(0, Number(limit));
+    const totalSize = rows.length;
     if (isCount) return { status: 200, body: { totalSize, done: true, records: [] } };
     const v = this.project.apiVersion;
     const records = rows.map((r) => {
@@ -248,7 +336,27 @@ class DemoSalesforce {
       }
       return out;
     });
+    // Pagination: when more rows than one batch, return the first batch plus a nextRecordsUrl locator.
+    const batch = opts.batchSize || 2000;
+    if (records.length > batch) {
+      const locator = '01g5g' + crypto.randomBytes(6).toString('hex').toUpperCase() + 'AAA';
+      this.store.cursors.set(locator, { records, offset: batch, batch, totalSize });
+      return { status: 200, body: { totalSize, done: false, nextRecordsUrl: `/services/data/v${v}/query/${locator}`, records: records.slice(0, batch) } };
+    }
     return { status: 200, body: { totalSize, done: true, records } };
+  }
+
+  /** Next page of a paginated query (GET .../query/<locator>). */
+  queryMore(locator) {
+    const cur = this.store.cursors.get(locator);
+    if (!cur) return sfError(400, 'INVALID_QUERY_LOCATOR', 'Invalid query locator');
+    const records = cur.records.slice(cur.offset, cur.offset + cur.batch);
+    cur.offset += cur.batch;
+    if (cur.offset >= cur.records.length) {
+      this.store.cursors.delete(locator);
+      return { status: 200, body: { totalSize: cur.totalSize, done: true, records } };
+    }
+    return { status: 200, body: { totalSize: cur.totalSize, done: false, nextRecordsUrl: `/services/data/v${this.project.apiVersion}/query/${locator}`, records } };
   }
 
   // ── request dispatcher ────────────────────────────────────────────────────
@@ -260,7 +368,9 @@ class DemoSalesforce {
     for (const [k, v] of Object.entries(r.query || {})) if (v !== undefined && v !== '') url.searchParams.set(k, v);
     let body = r.body;
     let parseError = null;
-    if (r.bodyRaw !== undefined && r.bodyRaw !== null && r.bodyRaw !== '' && r.apiType !== 'SOAP' && !String(r.headers && (r.headers['Content-Type'] || r.headers['content-type']) || '').includes('csv')) {
+    // Only parse the body as JSON when the Content-Type is JSON (or unspecified); CSV / XML / form bodies stay raw.
+    const ctype = String((r.headers && (r.headers['Content-Type'] || r.headers['content-type'])) || '');
+    if (r.bodyRaw !== undefined && r.bodyRaw !== null && r.bodyRaw !== '' && r.apiType !== 'SOAP' && (!ctype || /json/i.test(ctype))) {
       try { body = JSON.parse(r.bodyRaw); } catch (e) { parseError = e.message; }
     }
     let result;
@@ -305,7 +415,8 @@ class DemoSalesforce {
       const params = new URLSearchParams(typeof r.bodyRaw === 'string' ? r.bodyRaw : '');
       const grant = params.get('grant_type') || (body && body.grant_type);
       const cid = params.get('client_id') || (body && body.client_id);
-      if (!grant) return { status: 400, body: { error: 'unsupported_grant_type', error_description: 'grant type not supported' } };
+      const GRANTS = ['client_credentials', 'refresh_token', 'authorization_code', 'password', 'urn:ietf:params:oauth:grant-type:jwt-bearer'];
+      if (!grant || !GRANTS.includes(grant)) return { status: 400, body: { error: 'unsupported_grant_type', error_description: 'grant type not supported' } };
       if (!cid || cid === 'invalid') return { status: 400, body: { error: 'invalid_client_id', error_description: 'client identifier invalid' } };
       const secret = params.get('client_secret') || (body && body.client_secret);
       if (grant === 'client_credentials' && (!secret || secret === 'invalid')) return { status: 400, body: { error: 'invalid_client', error_description: 'invalid client credentials' } };
@@ -326,9 +437,15 @@ class DemoSalesforce {
     const rest = vm[2] || '/';
     if (rest === '/') return { status: 200, body: { sobjects: `/services/data/v${vm[1]}/sobjects`, query: `/services/data/v${vm[1]}/query`, composite: `/services/data/v${vm[1]}/composite`, limits: `/services/data/v${vm[1]}/limits`, graphql: `/services/data/v${vm[1]}/graphql`, tooling: `/services/data/v${vm[1]}/tooling`, jobs: `/services/data/v${vm[1]}/jobs` } };
     if (rest === '/limits') return { status: 200, body: { DailyApiRequests: { Max: 15000, Remaining: 13780 }, DailyBulkV2QueryJobs: { Max: 10000, Remaining: 9998 }, DataStorageMB: { Max: 1024, Remaining: 911 }, ConcurrentAsyncGetReportInstances: { Max: 200, Remaining: 200 } } };
+    const qm = rest.match(/^\/query(?:All)?\/([A-Za-z0-9]+)$/);
+    if (qm) return method === 'GET' ? this.queryMore(qm[1]) : sfError(405, 'METHOD_NOT_ALLOWED', `HTTP Method '${method}' not allowed. Allowed are GET,HEAD`);
     if (rest === '/query' || rest === '/queryAll') {
+      if (method !== 'GET') return sfError(405, 'METHOD_NOT_ALLOWED', `HTTP Method '${method}' not allowed. Allowed are GET,HEAD`);
       const q = url.searchParams.get('q') || '';
-      const res = this.soql(q, ctx.lowpriv);
+      // Sforce-Query-Options: batchSize=N (real orgs clamp N to 200..2000; the simulator accepts 1..2000 so pagination is demonstrable on small data).
+      const hdr = Object.entries(ctx.headers || {}).find(([k]) => k.toLowerCase() === 'sforce-query-options');
+      const bs = hdr && String(hdr[1]).match(/batchSize\s*=\s*(\d+)/i);
+      const res = this.soql(q, ctx.lowpriv, bs ? { batchSize: Math.min(2000, Math.max(1, Number(bs[1]))) } : {});
       // D3: Case queries exceed the 1500 ms SLA.
       if (/\bFROM\s+Case\b/i.test(q)) res.latency = 1580 + Math.random() * 320;
       return res;
@@ -435,6 +552,13 @@ class DemoSalesforce {
     return sfError(405, 'METHOD_NOT_ALLOWED', `HTTP Method '${method}' not allowed. Allowed are GET,HEAD,PATCH,DELETE`);
   }
 
+  /** Deep-ish copy of every record so a failed all-or-none transaction can be undone. */
+  snapshot() {
+    return Object.fromEntries(Object.entries(this.store.objects).map(([k, m]) => [k, new Map([...m].map(([id, r]) => [id, { ...r }]))]));
+  }
+
+  restore(snap) { this.store.objects = snap; }
+
   async composite(rest, method, body, ctx, v, url) {
     if (rest === '/composite/sobjects' && method === 'DELETE') {
       const ids = String((url && url.searchParams.get('ids')) || '').split(',').filter(Boolean);
@@ -460,104 +584,381 @@ class DemoSalesforce {
         const type = rec.attributes && rec.attributes.type;
         const { attributes, ...fields } = rec;
         const res = this.sobject(type || 'Unknown', undefined, undefined, 'POST', fields, new URL('https://x'), ctx, v);
-        if (res.status === 201) { results.push({ id: res.body.id, success: true, errors: [] }); created.push([type, res.body.id]); }
+        if (res.status === 201) { results.push({ id: res.body.id, success: true, errors: [] }); created.push([Object.keys(OBJECTS).find((o) => o.toLowerCase() === String(type).toLowerCase()), res.body.id]); }
         else results.push({ success: false, errors: res.body.map((e) => ({ statusCode: e.errorCode, message: e.message, fields: e.fields || [] })) });
       }
       if (allOrNone && results.some((x) => !x.success)) {
-        for (const [type, id] of created) { const map = this.store.objects[type]; map.delete(id); }
+        for (const [type, id] of created) this.store.objects[type].delete(id);
         return { status: 200, body: results.map((x) => (x.success ? { success: false, errors: [{ statusCode: 'ALL_OR_NONE_OPERATION_ROLLED_BACK', message: 'Record rolled back because not all records were valid and the request was using AllOrNone header', fields: [] }] } : x)) };
       }
       return { status: 200, body: results };
     }
     if (rest === '/composite') {
-      const subs = (body && body.compositeRequest) || [];
+      const subs = body && body.compositeRequest;
+      if (!Array.isArray(subs) || !subs.length) return sfError(400, 'JSON_PARSER_ERROR', 'compositeRequest: field is required and must be a non-empty array');
       if (subs.length > 25) return sfError(400, 'INVALID_COMPOSITE_REQUEST', 'The number of subrequests exceeds the limit of 25');
+      const bad = subs.findIndex((s) => !s || !s.method || !s.url || !s.referenceId);
+      if (bad >= 0) return sfError(400, 'JSON_PARSER_ERROR', `compositeRequest[${bad}]: method, url and referenceId are required`);
+      const ids = subs.map((s) => s.referenceId);
+      if (new Set(ids).size !== ids.length) return sfError(400, 'JSON_PARSER_ERROR', 'Duplicate referenceId in compositeRequest');
+      const allOrNone = Boolean(body.allOrNone);
+      const snap = allOrNone ? this.snapshot() : null;
       const refs = {};
       const out = [];
       let failed = false;
+      const halted = (referenceId) => ({ body: [{ errorCode: 'PROCESSING_HALTED', message: 'The transaction was rolled back since another operation in the same transaction failed.' }], httpHeaders: {}, httpStatusCode: 400, referenceId });
+      const getPath = (o, path) => path.split(/\.|\[(\d+)\]/).filter((k) => k !== undefined && k !== '').reduce((acc, k) => (acc === null || acc === undefined ? acc : acc[k]), o);
+      const resolve = (x) => JSON.parse(JSON.stringify(x).replace(/@\{(\w+)\.([^}]+)\}/g, (_, r, path) => { const val = refs[r] === undefined ? undefined : getPath(refs[r], path); return val === undefined || val === null ? '' : String(val).replace(/"/g, '\\"'); }));
       for (const s of subs) {
-        if (failed && body.allOrNone) { out.push({ body: [{ errorCode: 'PROCESSING_HALTED', message: 'The transaction was rolled back since another operation in the same transaction failed.' }], httpHeaders: {}, httpStatusCode: 400, referenceId: s.referenceId }); continue; }
-        const resolve = (x) => JSON.parse(JSON.stringify(x).replace(/@\{(\w+)\.([\w.\[\]]+)\}/g, (_, r, path) => (refs[r] ? String(path.split('.').reduce((o, k) => (o ? o[k] : ''), refs[r])) : '')));
+        if (failed && allOrNone) { out.push(halted(s.referenceId)); continue; }
         const subUrl = new URL('https://demo-org.my.salesforce.com' + resolve(s.url));
         const res = await this.route(subUrl, String(s.method).toUpperCase(), s.body ? resolve(s.body) : undefined, ctx);
         refs[s.referenceId] = res.body;
         if (res.status >= 400) failed = true;
         out.push({ body: res.body === undefined ? null : res.body, httpHeaders: {}, httpStatusCode: res.status, referenceId: s.referenceId });
       }
+      if (failed && allOrNone) {
+        // Atomic semantics: undo every write, and report the subrequests that had succeeded as rolled back.
+        this.restore(snap);
+        for (const o of out) if (o.httpStatusCode < 400) Object.assign(o, halted(o.referenceId));
+      }
       return { status: 200, body: { compositeResponse: out } };
     }
     if (rest === '/composite/graph') {
-      const graphs = (body && body.graphs) || [];
+      const graphs = body && body.graphs;
+      if (!Array.isArray(graphs) || !graphs.length) return sfError(400, 'JSON_PARSER_ERROR', 'graphs: field is required and must be a non-empty array');
       const results = [];
       for (const g of graphs) {
         const r = await this.composite('/composite', 'POST', { allOrNone: true, compositeRequest: g.compositeRequest }, ctx, v);
+        if (r.status >= 400) { results.push({ graphId: g.graphId, isSuccessful: false, graphResponse: { errors: r.body } }); continue; }
         const ok = r.body.compositeResponse.every((x) => x.httpStatusCode < 400);
-        results.push({ graphId: g.graphId, isSuccessful: ok, graphResponse: { compositeResponse: r.body.compositeResponse } });
+        results.push({ graphId: g.graphId, isSuccessful: ok, graphResponse: { graphId: g.graphId, compositeResponse: r.body.compositeResponse } });
       }
       return { status: 200, body: { graphs: results } };
     }
     return sfError(404, 'NOT_FOUND', 'The requested resource does not exist');
   }
 
+  // ── GraphQL (UI API subset): real parser, field/arg validation, pagination ───
   graphql(body, ctx) {
-    const q = (body && body.query) || '';
-    const m = q.match(/query\s*\{\s*(\w+)\s*(?:\(\s*first\s*:\s*(\d+)\s*\))?\s*\{\s*edges\s*\{\s*node\s*\{([\s\S]*?)\}\s*\}\s*\}/);
-    if (!m) return { status: 200, body: { data: null, errors: [{ message: 'Validation error: unsupported or invalid query for the demo simulator', locations: [], extensions: { ErrorType: 'ValidationError' } }] } };
-    const obj = m[1];
-    if (!OBJECTS[obj] || (ctx.lowpriv && LOW_PRIV.noAccessObjects.includes(obj))) return { status: 200, body: { data: null, errors: [{ message: `Validation error: Field '${obj}' in type 'RecordQuery' is undefined`, extensions: { ErrorType: 'ValidationError' } }] } };
-    const fieldNames = m[3].match(/\b(\w+)\b(?=\s*(\{|$|\s))/g).filter((x) => x !== 'value');
-    const rows = [...this.store.objects[obj].values()].filter((x) => !x.IsDeleted).slice(0, Number(m[2] || 10));
-    return { status: 200, body: { data: { uiapi: { query: { [obj]: { edges: rows.map((r) => ({ node: Object.fromEntries(fieldNames.map((fn) => [fn, fn === 'Id' ? r.Id : { value: r[fn] ?? null }])) })) } } } }, errors: [] } };
+    const fail = (message, type = 'ValidationError') => ({ status: 200, body: { data: null, errors: [{ message, locations: [], extensions: { ErrorType: type } }] } });
+    if (!body || typeof body !== 'object' || typeof body.query !== 'string' || !body.query.trim()) {
+      return sfError(400, 'JSON_PARSER_ERROR', 'A GraphQL request must include a JSON body with a "query" string');
+    }
+    try {
+      const doc = parseGql(body.query, body.variables && typeof body.variables === 'object' ? body.variables : {});
+      if (doc.operation !== 'query') throw new GqlError(`Operation '${doc.operation}' is not supported by the demo simulator (queries only).`);
+      let sel = doc.selection;
+      if (sel.length !== 1 || sel[0].name !== 'uiapi' || !sel[0].selection) throw new GqlError("Validation error (FieldUndefined@[]) : Field '" + sel[0].name + "' in type 'Query' is undefined. Salesforce GraphQL queries start with uiapi { query { ... } }");
+      sel = sel[0].selection;
+      if (sel.length !== 1 || sel[0].name !== 'query' || !sel[0].selection) throw new GqlError(`Validation error (FieldUndefined@[uiapi/${sel[0].name}]) : Field '${sel[0].name}' in type 'UIAPI' is undefined`);
+      const data = {};
+      for (const root of sel[0].selection) {
+        const path = `uiapi/query/${root.name}`;
+        const obj = Object.keys(OBJECTS).find((o) => o === root.name);
+        if (!obj || OBJECTS[obj].isEvent || (ctx.lowpriv && LOW_PRIV.noAccessObjects.includes(obj))) throw new GqlError(`Validation error (FieldUndefined@[${path}]) : Field '${root.name}' in type 'RecordQuery' is undefined`);
+        data[root.alias] = this.gqlConnection(obj, root, path, ctx);
+      }
+      return { status: 200, body: { data: { uiapi: { query: data } }, errors: [] } };
+    } catch (e) {
+      if (e instanceof GqlError) return fail(e.message, e.type);
+      throw e;
+    }
   }
 
+  gqlConnection(obj, root, path, ctx) {
+    const meta = OBJECTS[obj];
+    const hidden = ctx.lowpriv ? LOW_PRIV.hiddenFields[obj] || [] : [];
+    const args = root.args;
+    for (const k of Object.keys(args)) if (!['first', 'after', 'where', 'orderBy'].includes(k)) throw new GqlError(`Validation error (UnknownArgument@[${path}]) : Unknown argument '${k}'`);
+    const first = args.first === undefined ? 10 : args.first;
+    if (!Number.isInteger(first) || first < 1 || first > 2000) throw new GqlError(`Validation error (WrongType@[${path}]) : argument 'first' must be an integer between 1 and 2000`);
+    let off = 0;
+    if (args.after !== undefined) {
+      off = Number(Buffer.from(String(args.after), 'base64').toString());
+      if (!Number.isInteger(off) || off < 0) throw new GqlError(`Validation error (WrongType@[${path}]) : argument 'after' is not a valid cursor`);
+    }
+    const fieldOf = (name) => meta.fields.find((x) => x.name === name && !hidden.includes(x.name));
+    let rows = [...this.store.objects[obj].values()].filter((r) => !r.IsDeleted);
+    const matches = (rec, where) => Object.entries(where || {}).every(([field, cond]) => {
+      if (field === 'and' || field === 'or') {
+        const list = Array.isArray(cond) ? cond : [cond];
+        return field === 'and' ? list.every((w) => matches(rec, w)) : list.some((w) => matches(rec, w));
+      }
+      if (!fieldOf(field)) throw new GqlError(`Validation error (FieldUndefined@[${path}/where/${field}]) : Field '${field}' in type '${obj}_Filter' is undefined`);
+      const rv = rec[field] === undefined ? null : rec[field];
+      return Object.entries(cond || {}).every(([op, raw]) => {
+        const val = raw && typeof raw === 'object' && 'enum' in raw ? raw.enum : raw;
+        switch (op) {
+          case 'eq': return rv === val;
+          case 'ne': return rv !== val;
+          case 'lt': return rv !== null && rv < val;
+          case 'lte': return rv !== null && rv <= val;
+          case 'gt': return rv !== null && rv > val;
+          case 'gte': return rv !== null && rv >= val;
+          case 'in': return Array.isArray(val) && val.includes(rv);
+          case 'nin': return Array.isArray(val) && !val.includes(rv);
+          case 'like': return rv !== null && new RegExp('^' + String(val).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.') + '$', 'i').test(String(rv));
+          default: throw new GqlError(`Validation error (FieldUndefined@[${path}/where/${field}/${op}]) : Field '${op}' is not a supported operator`);
+        }
+      });
+    });
+    if (args.where) rows = rows.filter((r) => matches(r, args.where));
+    const ob = args.orderBy;
+    if (ob) {
+      const [field, spec] = Object.entries(ob)[0] || [];
+      if (!field || !fieldOf(field)) throw new GqlError(`Validation error (FieldUndefined@[${path}/orderBy]) : Field '${field}' is not defined`);
+      const desc = spec && spec.order && (spec.order.enum || spec.order) === 'DESC';
+      rows.sort((a, b) => (a[field] > b[field] ? 1 : a[field] < b[field] ? -1 : 0) * (desc ? -1 : 1));
+    }
+    const page = rows.slice(off, off + first);
+    const end = off + page.length;
+    const b64 = (n) => Buffer.from(String(n)).toString('base64');
+    const out = {};
+    for (const f of root.selection || []) {
+      if (f.name === 'totalCount') out[f.alias] = rows.length;
+      else if (f.name === 'pageInfo') {
+        if (!f.selection) throw new GqlError(`Validation error (SubselectionRequired@[${path}/pageInfo]) : Subselection required for type 'PageInfo' of field 'pageInfo'`);
+        const info = { hasNextPage: end < rows.length, hasPreviousPage: off > 0, startCursor: b64(off), endCursor: b64(end) };
+        out[f.alias] = Object.fromEntries(f.selection.map((x) => { if (!(x.name in info)) throw new GqlError(`Validation error (FieldUndefined@[${path}/pageInfo/${x.name}]) : Field '${x.name}' in type 'PageInfo' is undefined`); return [x.alias, info[x.name]]; }));
+      } else if (f.name === 'edges') {
+        if (!f.selection) throw new GqlError(`Validation error (SubselectionRequired@[${path}/edges]) : Subselection required for type '${obj}Edge' of field 'edges'`);
+        out[f.alias] = page.map((rec, i) => {
+          const edge = {};
+          for (const ef of f.selection) {
+            if (ef.name === 'cursor') edge[ef.alias] = b64(off + i + 1);
+            else if (ef.name === 'node') {
+              if (!ef.selection) throw new GqlError(`Validation error (SubselectionRequired@[${path}/edges/node]) : Subselection required for type '${obj}' of field 'node'`);
+              edge[ef.alias] = this.gqlNode(obj, rec, ef.selection, `${path}/edges/node`, ctx);
+            } else throw new GqlError(`Validation error (FieldUndefined@[${path}/edges/${ef.name}]) : Field '${ef.name}' in type '${obj}Edge' is undefined`);
+          }
+          return edge;
+        });
+      } else throw new GqlError(`Validation error (FieldUndefined@[${path}/${f.name}]) : Field '${f.name}' in type '${obj}Connection' is undefined`);
+    }
+    return out;
+  }
+
+  gqlNode(obj, rec, selection, path, ctx) {
+    const meta = OBJECTS[obj];
+    const hidden = ctx.lowpriv ? LOW_PRIV.hiddenFields[obj] || [] : [];
+    const out = {};
+    for (const f of selection) {
+      const here = `${path}/${f.name}`;
+      if (f.name === '__typename') { out[f.alias] = obj; continue; }
+      if (f.name === 'Id') {
+        if (f.selection) throw new GqlError(`Validation error (SubselectionNotAllowed@[${here}]) : Subselection not allowed on leaf type 'ID' of field 'Id'`);
+        out[f.alias] = rec.Id; continue;
+      }
+      const fm = meta.fields.find((x) => x.name === f.name && !hidden.includes(x.name));
+      if (fm) {
+        if (!f.selection) throw new GqlError(`Validation error (SubselectionRequired@[${here}]) : Subselection required for type '${fm.type}Value' of field '${f.name}'`);
+        const raw = rec[fm.name] === undefined ? null : rec[fm.name];
+        const cell = { value: raw, displayValue: raw === null ? null : String(raw) };
+        out[f.alias] = Object.fromEntries(f.selection.map((x) => { if (!(x.name in cell)) throw new GqlError(`Validation error (FieldUndefined@[${here}/${x.name}]) : Field '${x.name}' in type '${fm.type}Value' is undefined`); return [x.alias, cell[x.name]]; }));
+        continue;
+      }
+      const rel = meta.fields.find((x) => x.relationshipName === f.name && !hidden.includes(x.name));
+      if (rel) {
+        if (!f.selection) throw new GqlError(`Validation error (SubselectionRequired@[${here}]) : Subselection required for type '${rel.referenceTo[0] || 'Record'}' of field '${f.name}'`);
+        if (rel.referenceTo[0] === 'User' || rel.name === 'OwnerId') {
+          const user = { Id: '0055g00000QaUsrAAA', Name: 'QA Integration User', Email: 'qa.integration@demo.example.com' };
+          out[f.alias] = Object.fromEntries(f.selection.map((x) => {
+            if (x.name === 'Id') return [x.alias, user.Id];
+            if (x.name === '__typename') return [x.alias, 'User'];
+            if (!(x.name in user)) throw new GqlError(`Validation error (FieldUndefined@[${here}/${x.name}]) : Field '${x.name}' in type 'User' is undefined`);
+            return [x.alias, { value: user[x.name], displayValue: user[x.name] }];
+          }));
+          continue;
+        }
+        const parent = rec[rel.name] ? this.findById(rec[rel.name]) : null;
+        out[f.alias] = parent ? this.gqlNode(parent.obj, parent.rec, f.selection, here, ctx) : null;
+        continue;
+      }
+      throw new GqlError(`Validation error (FieldUndefined@[${here}]) : Field '${f.name}' in type '${obj}' is undefined`);
+    }
+    return out;
+  }
+
+  // ── Tooling API ───────────────────────────────────────────────────────────
   tooling(rest, url) {
     if (rest.startsWith('/tooling/query')) {
       const q = url.searchParams.get('q') || '';
-      if (/FROM\s+ApexClass/i.test(q)) return { status: 200, body: { size: 3, totalSize: 3, done: true, entityTypeName: 'ApexClass', records: [{ attributes: { type: 'ApexClass' }, Id: '01p5g00000Cls01AAA', Name: 'ContactSyncService', ApiVersion: 62.0, Status: 'Active' }, { attributes: { type: 'ApexClass' }, Id: '01p5g00000Cls02AAA', Name: 'InvoiceRestResource', ApiVersion: 62.0, Status: 'Active' }, { attributes: { type: 'ApexClass' }, Id: '01p5g00000Cls03AAA', Name: 'LeadIntakeResource', ApiVersion: 61.0, Status: 'Active' }] } };
-      if (/FROM\s+ValidationRule/i.test(q)) return { status: 200, body: { size: 2, totalSize: 2, done: true, entityTypeName: 'ValidationRule', records: [{ attributes: { type: 'ValidationRule' }, Id: '03d5g00000VR001AAA', ValidationName: 'Amount_Positive', Active: true, EntityDefinitionId: 'Opportunity' }, { attributes: { type: 'ValidationRule' }, Id: '03d5g00000VR002AAA', ValidationName: 'Invoice_Amount_Not_Negative', Active: true, EntityDefinitionId: 'Invoice__c' }] } };
-      if (/FROM\s+Flow/i.test(q)) return { status: 200, body: { size: 1, totalSize: 1, done: true, records: [{ attributes: { type: 'Flow' }, Id: '3015g00000Flw01AAA', MasterLabel: 'Account Rating Normalizer', Status: 'Active', ProcessType: 'AutoLaunchedFlow' }] } };
-      return { status: 200, body: { size: 0, totalSize: 0, done: true, records: [] } };
+      const m = q.trim().match(/^SELECT\s+[\s\S]+?\s+FROM\s+(\w+)/i);
+      if (!m) return sfError(400, 'MALFORMED_QUERY', `unexpected token in query: ${q.slice(0, 60)}`);
+      const entity = m[1].toLowerCase();
+      const known = {
+        apexclass: ['ApexClass', [{ attributes: { type: 'ApexClass' }, Id: '01p5g00000Cls01AAA', Name: 'ContactSyncService', ApiVersion: 62.0, Status: 'Active' }, { attributes: { type: 'ApexClass' }, Id: '01p5g00000Cls02AAA', Name: 'InvoiceRestResource', ApiVersion: 62.0, Status: 'Active' }, { attributes: { type: 'ApexClass' }, Id: '01p5g00000Cls03AAA', Name: 'LeadIntakeResource', ApiVersion: 61.0, Status: 'Active' }]],
+        validationrule: ['ValidationRule', [{ attributes: { type: 'ValidationRule' }, Id: '03d5g00000VR001AAA', ValidationName: 'Amount_Positive', Active: true, EntityDefinitionId: 'Opportunity' }, { attributes: { type: 'ValidationRule' }, Id: '03d5g00000VR002AAA', ValidationName: 'Invoice_Amount_Not_Negative', Active: true, EntityDefinitionId: 'Invoice__c' }]],
+        flow: ['Flow', [{ attributes: { type: 'Flow' }, Id: '3015g00000Flw01AAA', MasterLabel: 'Account Rating Normalizer', Status: 'Active', ProcessType: 'AutoLaunchedFlow' }]],
+        apextrigger: ['ApexTrigger', []],
+      };
+      if (!known[entity]) return sfError(400, 'INVALID_TYPE', `sObject type '${m[1]}' is not supported by the demo Tooling API simulator (ApexClass, ApexTrigger, ValidationRule, Flow).`);
+      const [name, records] = known[entity];
+      const limit = q.match(/\bLIMIT\s+(\d+)/i);
+      const rows = limit ? records.slice(0, Number(limit[1])) : records;
+      return { status: 200, body: { size: rows.length, totalSize: rows.length, done: true, queryLocator: null, entityTypeName: name, records: rows } };
     }
     return sfError(404, 'NOT_FOUND', 'The requested resource does not exist');
   }
 
+  // ── Bulk API 2.0 (ingest): real per-record processing with CSV result files ──
   bulk(rest, method, body, ctx) {
     const jobs = this.store.bulkJobs;
+    const v = Number(this.project.apiVersion);
+    const view = (j) => ({
+      id: j.id, operation: j.operation, object: j.object, createdById: '0055g00000QaUsrAAA', createdDate: j.createdDate, systemModstamp: j.createdDate,
+      state: j.state, concurrencyMode: 'Parallel', contentType: 'CSV', apiVersion: v, jobType: 'V2Ingest', lineEnding: j.lineEnding, columnDelimiter: 'COMMA',
+      numberRecordsProcessed: j.state === 'JobComplete' ? j.rows : 0, numberRecordsFailed: j.state === 'JobComplete' ? j.failed.length : 0, retries: 0,
+      totalProcessingTime: j.state === 'JobComplete' ? 40 + j.rows : 0, apiActiveProcessingTime: 0, apexProcessingTime: 0,
+      ...(j.externalIdFieldName ? { externalIdFieldName: j.externalIdFieldName } : {}),
+    });
+    if (rest === '/jobs/ingest' && method === 'GET') return { status: 200, body: { done: true, records: [...jobs.values()].map(view), nextRecordsUrl: null } };
     if (rest === '/jobs/ingest' && method === 'POST') {
-      if (!body || !body.object || !body.operation) return sfError(400, 'INVALIDJOB', 'InvalidJob : object and operation are required');
-      if (!OBJECTS[body.object]) return sfError(400, 'INVALIDJOB', `InvalidJob : Unable to find object: ${body.object}`);
+      const err = (m) => sfError(400, 'INVALIDJOB', `InvalidJob : ${m}`);
+      if (!body || typeof body !== 'object' || !body.object || !body.operation) return err('object and operation are required');
+      const obj = Object.keys(OBJECTS).find((o) => o === body.object);
+      if (!obj || OBJECTS[obj].isEvent || (ctx.lowpriv && LOW_PRIV.noAccessObjects.includes(obj))) return err(`Unable to find object: ${body.object}`);
+      if (!['insert', 'update', 'upsert', 'delete', 'hardDelete'].includes(body.operation)) return err(`Invalid operation: ${body.operation}`);
+      if (body.contentType && String(body.contentType).toUpperCase() !== 'CSV') return err(`Content type ${body.contentType} is not supported; use CSV`);
+      if (body.lineEnding && !['LF', 'CRLF'].includes(body.lineEnding)) return err(`Invalid lineEnding: ${body.lineEnding}`);
+      if (body.operation === 'upsert') {
+        const fm = OBJECTS[obj].fields.find((x) => x.name === body.externalIdFieldName);
+        if (!body.externalIdFieldName) return err('externalIdFieldName is required for upsert');
+        if (!fm || (!fm.externalId && fm.name !== 'Id')) return err(`Field ${body.externalIdFieldName} is not an external id field on ${obj}`);
+      }
       const id = checksumId('7505g' + b62(jobs.size + 1, 10));
-      jobs.set(id, { id, object: body.object, operation: body.operation, state: 'Open', contentType: 'CSV', lineEnding: body.lineEnding || 'LF', rows: 0, createdDate: nowIso() });
-      return { status: 200, body: { ...jobs.get(id), apiVersion: Number(this.project.apiVersion) } };
+      jobs.set(id, { id, object: obj, operation: body.operation, externalIdFieldName: body.externalIdFieldName, state: 'Open', lineEnding: body.lineEnding || 'LF', rows: 0, csv: null, header: [], successful: [], failed: [], unprocessed: [], createdDate: nowIso() });
+      return { status: 200, body: view(jobs.get(id)) };
     }
-    const m = rest.match(/^\/jobs\/ingest\/(\w+)(\/batches|\/successfulResults|\/failedResults)?$/);
+    const m = rest.match(/^\/jobs\/ingest\/(\w+)(\/batches|\/successfulResults|\/failedResults|\/unprocessedrecords)?$/);
     if (!m || !jobs.has(m[1])) return sfError(404, 'NOT_FOUND', 'The requested resource does not exist');
     const job = jobs.get(m[1]);
-    if (m[2] === '/batches' && method === 'PUT') {
-      const lines = String(ctx.raw || '').trim().split(/\r?\n/);
-      job.rows = Math.max(0, lines.length - 1);
+    const csvOut = (rows) => ({ status: 200, body: csv.stringify(rows), contentType: 'text/csv' });
+    if (m[2] === '/batches') {
+      if (method !== 'PUT') return sfError(405, 'METHOD_NOT_ALLOWED', `HTTP Method '${method}' not allowed. Allowed are PUT`);
+      const ct = Object.entries(ctx.headers || {}).find(([k]) => k.toLowerCase() === 'content-type');
+      if (!ct || !/text\/csv/i.test(ct[1])) return sfError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type must be text/csv for Bulk API 2.0 uploads');
+      if (job.state !== 'Open') return sfError(400, 'INVALIDBATCH', `InvalidBatch : Job is in state ${job.state}; data can only be uploaded to an Open job`);
+      if (job.csv !== null) return sfError(400, 'INVALIDBATCH', 'InvalidBatch : Data has already been uploaded to this job');
+      const parsed = csv.parse(ctx.raw);
+      if (!parsed.header.length || !parsed.records.length) return sfError(400, 'INVALIDBATCH', 'InvalidBatch : The uploaded CSV must contain a header row and at least one record');
+      if (parsed.records.length > 150000000) return sfError(400, 'INVALIDBATCH', 'InvalidBatch : Too many records');
+      Object.assign(job, { csv: ctx.raw, header: parsed.header, rows: parsed.records.length, parsed: parsed.records });
       return { status: 201, body: undefined };
     }
-    if (m[2] === '/successfulResults') return { status: 200, body: 'sf__Id,sf__Created\n', contentType: 'text/csv' };
-    if (m[2] === '/failedResults') return { status: 200, body: 'sf__Id,sf__Error\n', contentType: 'text/csv' };
-    if (method === 'PATCH') { job.state = body && body.state === 'Aborted' ? 'Aborted' : 'UploadComplete'; return { status: 200, body: job }; }
-    if (method === 'GET') {
-      if (job.state === 'UploadComplete') job.state = 'JobComplete';
-      return { status: 200, body: { ...job, numberRecordsProcessed: job.rows, numberRecordsFailed: 0 } };
+    // Everything below may need the (simulated asynchronous) processing to have completed.
+    if (m[2] && method !== 'GET') return sfError(405, 'METHOD_NOT_ALLOWED', `HTTP Method '${method}' not allowed. Allowed are GET`);
+    if (method === 'PATCH') {
+      const target = body && body.state;
+      if (target === 'UploadComplete') {
+        if (job.state !== 'Open') return sfError(400, 'INVALIDJOB', `InvalidJob : Job state ${job.state} cannot move to UploadComplete`);
+        if (job.csv === null) return sfError(400, 'INVALIDJOB', 'InvalidJob : No data has been uploaded to this job');
+        job.state = 'UploadComplete';
+        return { status: 200, body: view(job) };
+      }
+      if (target === 'Aborted') {
+        if (['JobComplete', 'Failed', 'Aborted'].includes(job.state)) return sfError(400, 'INVALIDJOB', `InvalidJob : Job in state ${job.state} cannot be aborted`);
+        job.state = 'Aborted';
+        job.unprocessed = job.parsed || [];
+        return { status: 200, body: view(job) };
+      }
+      return sfError(400, 'INVALIDJOB', `InvalidJob : Invalid state transition target: ${target === undefined ? '(none)' : target}`);
     }
-    if (method === 'DELETE') { jobs.delete(job.id); return { status: 204, body: undefined }; }
+    // First read after UploadComplete is when the queued job is processed.
+    if (job.state === 'UploadComplete') { this.bulkProcess(job, ctx); job.state = 'JobComplete'; }
+    if (m[2]) {
+      if (!['JobComplete', 'Aborted', 'Failed'].includes(job.state)) return sfError(400, 'INVALIDJOB', `InvalidJob : Results are not available while the job is ${job.state}`);
+      if (m[2] === '/successfulResults') return csvOut([['sf__Id', 'sf__Created', ...job.header], ...job.successful]);
+      if (m[2] === '/failedResults') return csvOut([['sf__Id', 'sf__Error', ...job.header], ...job.failed]);
+      return csvOut([job.header, ...job.unprocessed.map((r) => job.header.map((h) => r[h]))]);
+    }
+    if (method === 'GET') return { status: 200, body: view(job) };
+    if (method === 'DELETE') {
+      if (!['JobComplete', 'Aborted', 'Failed'].includes(job.state)) return sfError(400, 'INVALIDJOB', `InvalidJob : Job in state ${job.state} cannot be deleted`);
+      jobs.delete(job.id);
+      return { status: 204, body: undefined };
+    }
     return sfError(405, 'METHOD_NOT_ALLOWED', `HTTP Method '${method}' not allowed.`);
   }
 
+  /** Apply each CSV row through the same code path as the REST API; collect per-record results. */
+  bulkProcess(job, ctx) {
+    const meta = OBJECTS[job.object];
+    const coerce = (col, raw) => {
+      const fm = meta.fields.find((x) => x.name.toLowerCase() === col.toLowerCase());
+      if (raw === '#N/A') return null;
+      if (!fm) return raw;
+      if (['double', 'currency', 'int', 'percent'].includes(fm.type)) return raw === '' ? null : Number(raw);
+      if (fm.type === 'boolean') return raw === '' ? null : /^true$/i.test(raw);
+      return raw;
+    };
+    const stamp = (e) => `${e.errorCode}:${e.message}:${(e.fields || []).join(',')} --`;
+    const url = new URL('https://x');
+    const bulkCtx = { lowpriv: ctx.lowpriv, headers: {} };
+    for (const rec of job.parsed || []) {
+      const row = job.header.map((h) => rec[h]);
+      const fields = {};
+      for (const [col, raw] of Object.entries(rec)) if (raw !== '' && col !== 'Id') fields[col] = coerce(col, raw); // empty cell = ignore, #N/A = null
+      let res; let created = false;
+      const op = job.operation;
+      if (op === 'insert') { delete fields.Id; res = this.sobject(job.object, undefined, undefined, 'POST', fields, url, bulkCtx, this.project.apiVersion); created = true; }
+      else if (op === 'upsert') {
+        const key = job.externalIdFieldName; const val = rec[key];
+        if (!val) { job.failed.push(['', stamp({ errorCode: 'MISSING_ARGUMENT', message: `${key} not specified`, fields: [key] }), ...row]); continue; }
+        res = this.sobject(job.object, key, val, 'PATCH', Object.fromEntries(Object.entries(fields).filter(([k]) => k !== key)), url, bulkCtx, this.project.apiVersion);
+        created = res.status === 201;
+      } else {
+        if (!rec.Id) { job.failed.push(['', stamp({ errorCode: 'MISSING_ARGUMENT', message: 'Id not specified', fields: ['Id'] }), ...row]); continue; }
+        delete fields.Id;
+        if (op === 'update') res = this.sobject(job.object, rec.Id, undefined, 'PATCH', fields, url, bulkCtx, this.project.apiVersion);
+        else {
+          res = this.sobject(job.object, rec.Id, undefined, 'DELETE', undefined, url, bulkCtx, this.project.apiVersion);
+          if (res.status === 204 && op === 'hardDelete') { const f = this.findById(rec.Id); if (f) this.store.objects[f.obj].delete(f.rec.Id); }
+        }
+      }
+      if (res.status >= 400) {
+        const e = Array.isArray(res.body) ? res.body[0] : { errorCode: 'UNKNOWN_EXCEPTION', message: 'Unknown error' };
+        job.failed.push(['', stamp(e), ...row]);
+      } else {
+        const id = (res.body && res.body.id) || rec.Id || (job.externalIdFieldName ? (this.findByExt(job, rec[job.externalIdFieldName]) || '') : '');
+        job.successful.push([id, String(created), ...row]);
+      }
+    }
+    job.parsed = [];
+  }
+
+  findByExt(job, val) {
+    const rec = [...this.store.objects[job.object].values()].find((x) => x[job.externalIdFieldName] === val && !x.IsDeleted);
+    return rec && rec.Id;
+  }
+
+  // ── SOAP API (enterprise/partner subset) ────────────────────────────────────
   soap(p, ctx) {
     const raw = String(ctx.raw || '');
-    if (!/<(\w+:)?sessionId>[^<]+</.test(raw)) {
-      return { status: 500, contentType: 'text/xml', body: '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><soapenv:Fault><faultcode>sf:INVALID_SESSION_ID</faultcode><faultstring>INVALID_SESSION_ID: Invalid Session ID found in SessionHeader: Illegal Session</faultstring></soapenv:Fault></soapenv:Body></soapenv:Envelope>' };
+    const NS = 'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns="urn:partner.soap.sforce.com"';
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const envelope = (inner) => `<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope ${NS}><soapenv:Body>${inner}</soapenv:Body></soapenv:Envelope>`;
+    const fault = (code, text) => ({ status: 500, contentType: 'text/xml', body: envelope(`<soapenv:Fault><faultcode>${esc(code)}</faultcode><faultstring>${esc(text)}</faultstring></soapenv:Fault>`) });
+    const tag = (name) => { const m = raw.match(new RegExp(`<(?:\\w+:)?${name}>([\\s\\S]*?)</(?:\\w+:)?${name}>`)); return m ? m[1].trim() : ''; };
+    if (!raw.trim() || !/<(\w+:)?Envelope/.test(raw)) return fault('sf:UNKNOWN_EXCEPTION', 'UNKNOWN_EXCEPTION: Request body is not a SOAP envelope');
+    if (/<(\w+:)?login\b/.test(raw)) {
+      const user = tag('username'); const pass = tag('password');
+      if (!user || !pass || /invalid/i.test(user) || /^invalid$/i.test(pass)) return fault('sf:INVALID_LOGIN', 'INVALID_LOGIN: Invalid username, password, security token; or user locked out.');
+      return { status: 200, contentType: 'text/xml', body: envelope('<loginResponse><result><metadataServerUrl>https://demo-org.my.salesforce.com/services/Soap/m/62.0</metadataServerUrl><passwordExpired>false</passwordExpired><sandbox>true</sandbox><serverUrl>https://demo-org.my.salesforce.com/services/Soap/u/62.0</serverUrl><sessionId>00D5g000000DEMO!AQ0AQDemoSoapSessionForSimulatorOnly000</sessionId><userId>0055g00000QaUsrAAA</userId></result></loginResponse>') };
     }
-    if (/getServerTimestamp/.test(raw)) {
-      return { status: 200, contentType: 'text/xml', body: `<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns="urn:partner.soap.sforce.com"><soapenv:Body><getServerTimestampResponse><result><timestamp>${new Date().toISOString()}</timestamp></result></getServerTimestampResponse></soapenv:Body></soapenv:Envelope>` };
+    if (!/<(\w+:)?sessionId>[^<]+</.test(raw)) return fault('sf:INVALID_SESSION_ID', 'INVALID_SESSION_ID: Invalid Session ID found in SessionHeader: Illegal Session');
+    if (/<(\w+:)?sessionId>\s*(invalid|expired)/i.test(raw)) return fault('sf:INVALID_SESSION_ID', 'INVALID_SESSION_ID: Invalid Session ID found in SessionHeader: Illegal Session');
+    if (/getServerTimestamp/.test(raw)) return { status: 200, contentType: 'text/xml', body: envelope(`<getServerTimestampResponse><result><timestamp>${new Date().toISOString()}</timestamp></result></getServerTimestampResponse>`) };
+    if (/<(\w+:)?getUserInfo\b/.test(raw)) return { status: 200, contentType: 'text/xml', body: envelope('<getUserInfoResponse><result><userEmail>qa.integration@demo.example.com</userEmail><userFullName>QA Integration User</userFullName><userId>0055g00000QaUsrAAA</userId><organizationId>00D5g000000DEMOEAA</organizationId></result></getUserInfoResponse>') };
+    if (/<(\w+:)?query\b/.test(raw)) {
+      const q = tag('queryString').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+      const res = this.soql(q, ctx.lowpriv);
+      if (res.status >= 400) { const e = res.body[0]; return fault(`sf:${e.errorCode}`, `${e.errorCode}: ${e.message}`); }
+      const recs = res.body.records.map((r) => `<records xsi:type="sf:sObject" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sf="urn:sobject.partner.soap.sforce.com"><sf:type>${esc(r.attributes.type)}</sf:type>${Object.entries(r).filter(([k]) => k !== 'attributes').map(([k, val]) => `<sf:${k}>${val === null ? '' : esc(typeof val === 'object' ? JSON.stringify(val) : val)}</sf:${k}>`).join('')}</records>`).join('');
+      return { status: 200, contentType: 'text/xml', body: envelope(`<queryResponse><result><done>true</done><queryLocator xsi:nil="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>${recs}<size>${res.body.totalSize}</size></result></queryResponse>`) };
     }
-    return { status: 500, contentType: 'text/xml', body: '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><soapenv:Fault><faultcode>soapenv:Client</faultcode><faultstring>Demo simulator supports getServerTimestamp only</faultstring></soapenv:Fault></soapenv:Body></soapenv:Envelope>' };
+    return fault('soapenv:Client', 'Demo simulator supports login, getServerTimestamp, getUserInfo and query only');
   }
 
   // Apex REST — custom integration endpoints (middleware ⇄ Salesforce)

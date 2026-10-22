@@ -12,9 +12,9 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Defects' }]);
-      view.innerHTML = String(h`${C.pageHead('Defects', h`Jira issues raised from failed tests. Click a result in an execution to create a defect. Secrets are always masked.`,
+      view.innerHTML = String(h`${C.pageHead('Defects', h`Jira bugs created from failed tests. Nothing is filed until you preview and confirm. Secrets are always masked.`,
         h`<a class="btn" href="/execution" data-link>${ic('zap')} Find failed tests</a>`)}
-        <div class="callout success" style="margin-bottom:16px">${ic('check')}<div class="small"><b>Workflow:</b> Test fails → you review → you preview draft → you click Create → linked to story.</div></div>
+        ${C.pageIntro({ what: 'Defects are Jira issues linked back to a failed API test and its story.', next: 'Open a failed result in Test runs → Preview Jira defect → check the draft → Create. You can also jump from How QA works → Raise defects.' })}
         <div data-list></div>`);
       const list = C.listController(view.querySelector('[data-list]'), {
         sort: 'createdAt', dir: 'DESC', q: ctx.query.q || '', searchPlaceholder: 'Search key, summary or endpoint',

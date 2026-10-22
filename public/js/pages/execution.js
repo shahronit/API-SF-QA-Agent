@@ -16,8 +16,9 @@
   function renderList(view, ctx) {
     const p = QA.state.project;
     QA.router.setCrumbs([{ label: 'Test Runs' }]);
-    view.innerHTML = String(h`${C.pageHead('Test Runs', `Watch your test executions. Click a run to see detailed results and defects for ${p.name}.`,
-      h`<button class="btn" data-act="failed">${ic('zap')} Re-run failed</button><button class="btn primary" data-act="run">${ic('play')} Start new run</button>`)}
+    view.innerHTML = String(h`${C.pageHead('Test runs', `Each run is one execution of tests against ${p.name}. Open a row for results, Salesforce checks and defects.`,
+      h`<button class="btn" data-act="failed">${ic('zap')} Re-run failed</button><button class="btn primary" data-act="run">${ic('play')} Start a run</button>`)}
+      ${C.pageIntro({ what: 'History of every suite run for this project. Running ones update live.', next: 'Click Start a run to execute approved tests. After a run finishes, open it to see failures and raise defects.' })}
       ${C.connectionNotice(p)}<div data-list></div>`);
     const list = C.listController(view.querySelector('[data-list]'), {
       sort: 'startedAt', dir: 'DESC', searchPlaceholder: 'Search by execution id, label or user',
@@ -71,7 +72,8 @@
     const drawHead = () => {
       const exec = run.passed + run.failed;
       const s = run.summary || {};
-      head.innerHTML = String(h`${C.pageHead(h`<span class="mono" style="font-size:20px">${run.id}</span>`, h`${run.label || 'Execution'} · ${run.environment} · ${run.trigger || 'manual'} by ${run.user} · started ${fmt.date(run.startedAt)}`,
+      const via = run.options && run.options.executor === 'postman-mcp' ? ' · via Postman MCP' : '';
+      head.innerHTML = String(h`${C.pageHead(h`<span class="mono" style="font-size:20px">${run.id}</span>`, h`${run.label || 'Execution'} · ${run.environment} · ${run.trigger || 'manual'} by ${run.user}${via} · started ${fmt.date(run.startedAt)}`,
         h`${badge(run.status)}
           ${state.live ? h`<button class="btn danger-outline" data-act="stop">${ic('stop')} Stop run</button>` : h`
           <button class="btn" data-act="rerun-failed" ${run.failed + run.blocked ? '' : 'disabled'}>${ic('refresh')} Re-run failed</button>
@@ -84,7 +86,14 @@
           ${kpiCell('Pass rate', exec ? `${Math.round((run.passed / exec) * 1000) / 10}%` : '–')}
           ${kpiCell('Avg / p95', run.avgResponseMs ? h`${fmt.num(run.avgResponseMs)}<span class="unit">ms</span>` : '–', '', s.p95Ms ? `p95 ${fmt.ms(s.p95Ms)}` : '')}
           ${kpiCell('Duration', fmt.duration(run.startedAt, run.endedAt), '', run.sfErrors ? `${run.sfErrors} Salesforce errors` : `${run.apiErrors || 0} API errors`)}
-        </div>`);
+        </div>
+        ${(() => {
+          const tr = (s && s.traceability) || (run.options && run.options.traceability);
+          if (!tr) return '';
+          const labels = tr.labels || {};
+          const cli = tr.cli || {};
+          return h`<div class="callout info mt">${ic('layers')}<div class="small wrap"><b>Traceability.</b> Generator ${tr.generator || 'engine'}${tr.fallback ? ' (CLI fallback)' : ''} · AC mapped ${tr.acMappedPct == null ? '–' : tr.acMappedPct + '%'} · VERIFIED ${labels.VERIFIED || 0} · ASSUMED ${labels.ASSUMED || 0} · RECOMMENDED ${labels.RECOMMENDED || 0}${cli.keepRate != null ? ` · CLI keep ${cli.keepRate}%` : ''}. Defects are never filed automatically.</div></div>`;
+        })()}`);
     };
     const kpiCell = (label, value, tone = '', foot = '') => h`<div class="kpi ${tone}"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div>${foot ? h`<div class="kpi-foot">${foot}</div>` : ''}</div>`;
 
@@ -144,23 +153,38 @@
     on(pane, 'click', 'tr[data-rid]', (e, el) => { if (e.target.closest('button, a')) return; C.openResult(el.dataset.rid, { onChange: refreshAll }); });
     on(pane, 'click', '[data-defect]', (e, el) => C.defectPreview(el.dataset.defect, { onCreated: refreshAll }));
 
+    function compareCard(cmp) {
+      if (!cmp) return '';
+      if (!cmp.baseline) return h`<div class="card"><div class="card-head"><h2>Compared with previous run</h2></div><div class="card-body"><p class="small muted" style="margin:0">${cmp.message}</p></div></div>`;
+      const ids = (rows) => rows.slice(0, 6).map((x) => h`<li><span class="mono">${x.testCaseId}</span> ${x.title}</li>`);
+      const section = (title, rows) => (rows.length ? h`<div class="small mt-s"><b>${title} (${rows.length})</b><ul class="list muted" style="margin:4px 0 0">${ids(rows)}</ul></div>` : '');
+      return h`<div class="card"><div class="card-head"><h2>Compared with previous run</h2><span class="tag">${cmp.verdict}</span></div><div class="card-body">
+        <p class="small muted" style="margin:0">Baseline <a href="/execution/${cmp.baseline.id}" data-link class="mono">${cmp.baseline.id}</a> · ${cmp.stillFailing.length} still failing · ${cmp.newTests.length} new tests</p>
+        ${section('Newly failing', cmp.newlyFailing)}${section('Fixed', cmp.fixed)}${section('Slower (≥50% and ≥200 ms)', cmp.slower)}${section('Flaky across recent runs', cmp.flaky || [])}
+      </div></div>`;
+    }
+
     async function drawAnalysis() {
       pane.innerHTML = String(loading(6));
       try {
-        const a = await api.get(`/api/runs/${run.id}/analysis`);
-        if (!a.failures.length) { pane.innerHTML = String(h`<div class="card">${empty({ icon: 'check', title: 'No failures to analyse', text: 'Every executed test passed in this run.' })}</div>`); return; }
+        const [a, cmp] = await Promise.all([api.get(`/api/runs/${run.id}/analysis`), api.get(`/api/runs/${run.id}/compare`).catch(() => null)]);
+        if (!a.failures.length) { pane.innerHTML = String(h`<div class="card">${empty({ icon: 'check', title: 'No failures to analyse', text: 'Every executed test passed in this run.' })}</div>${cmp && cmp.baseline ? h`<div class="mt">${compareCard(cmp)}</div>` : ''}`); return; }
         pane.innerHTML = String(h`
           ${a.aiSummary ? h`<div class="callout info">${ic('spark')}<div><b>AI summary</b> ${QA.ui.prov('ASSUMED')}<div class="small mt-s" style="white-space:pre-wrap">${a.aiSummary}</div></div></div>` : ''}
           <div class="grid g-21 ${a.aiSummary ? 'mt' : ''}">
             <div class="card"><div class="card-head"><h2>Failures and root causes</h2><span class="small muted">Defects are never created automatically — preview and confirm each one.</span></div>
               <div class="card-body flush">${a.failures.map((f) => h`<div style="padding:14px 18px;border-bottom:1px solid var(--border)">
                 <div class="row wrap" style="gap:8px">${badge(f.status)}<b>${f.title}</b><span class="spacer"></span>${f.defectKey ? h`<a class="badge Open plain" href="/defects?q=${f.defectKey}" data-link>${f.defectKey}</a>` : f.status === 'failed' ? h`<button class="btn sm" data-defect="${f.resultId}">${ic('bug')} Preview Jira defect</button>` : ''}<button class="btn sm ghost" data-open="${f.resultId}">Details</button></div>
-                ${f.analysis ? h`<div class="row wrap small mt-s" style="gap:8px"><span class="tag">${f.analysis.category}</span>${QA.ui.prov(f.analysis.label)}<span class="muted">confidence ${f.analysis.confidence}</span>${f.statusCode ? h`<span class="muted">HTTP ${f.statusCode}</span>` : ''}</div>
+                ${f.analysis ? h`<div class="row wrap small mt-s" style="gap:8px">${f.analysis.classification ? h`<span class="tag" title="Failure classification">${f.analysis.classification}</span>` : ''}<span class="tag">${f.analysis.category}</span>${QA.ui.prov(f.analysis.label)}<span class="muted">confidence ${f.analysis.confidence}</span>${f.statusCode ? h`<span class="muted">HTTP ${f.statusCode}</span>` : ''}</div>
                 <p class="small" style="margin:8px 0 4px">${f.analysis.rootCause}</p>
                 ${f.analysis.evidence && f.analysis.evidence.length ? h`<ul class="list small muted" style="margin:0 0 6px">${f.analysis.evidence.slice(0, 4).map((x) => h`<li>${x}</li>`)}</ul>` : ''}
-                <p class="small" style="margin:0"><b>Recommended action:</b> ${f.analysis.action}</p>` : ''}
+                <p class="small" style="margin:0 0 4px"><b>Impact:</b> ${f.analysis.impact || ''}</p>
+                <p class="small" style="margin:0 0 4px"><b>Recommendation:</b> ${f.analysis.recommendation || f.analysis.action}</p>
+                <p class="small" style="margin:0"><b>Retest:</b> ${f.analysis.retest || ''}</p>
+                ${f.analysis.href ? h`<div class="form-actions mt"><a class="btn sm primary" href="${f.analysis.href}" data-link>${f.analysis.actionLabel || 'Open Connections'}</a></div>` : ''}` : ''}
               </div>`)}</div></div>
             <div class="stack">
+              ${compareCard(cmp)}
               <div class="card"><div class="card-head"><h2>Failure categories</h2></div><div class="card-body">${QA.charts.hbars ? raw(QA.charts.hbars({ items: a.categories.map((c) => ({ label: c.category, value: c.count, color: '--error' })) })) : ''}</div></div>
               <div class="card"><div class="card-head"><h2>Endpoint hotspots</h2></div><div class="card-body flush"><ul class="list" style="margin:0">${a.hotspots.map((x) => h`<li style="padding:10px 18px"><code class="mono small" style="word-break:break-all">${x.endpoint}</code><div class="small muted">${x.failed} of ${x.total} failed</div></li>`)}</ul></div></div>
               <div class="card"><div class="card-head"><h2>Regression recommendation</h2>${QA.ui.prov('RECOMMENDED')}</div><div class="card-body">

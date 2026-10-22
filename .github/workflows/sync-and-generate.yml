@@ -1,0 +1,55 @@
+name: Sync and generate (proposals only)
+
+# Creates reviewable proposals from Jira. Never approves, never runs tests,
+# never confirms production writes, never files defects.
+
+on:
+  workflow_dispatch:
+    inputs:
+      jql: { description: 'Optional JQL (empty = project default)', default: '' }
+      allStories: { description: 'Include tickets not classified as needing API tests', type: boolean, default: false }
+  schedule:
+    - cron: '0 6 * * 1-5'   # weekdays 06:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  generate-proposals:
+    name: Sync Jira and generate proposals
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PORT: 4317
+      HOST: 127.0.0.1
+      SEED_DEMO: 'false'
+      QA_PLATFORM_URL: http://127.0.0.1:4317
+      QA_PLATFORM_USER: github-actions
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Restore platform database
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: qa-platform-db-${{ github.ref_name }}
+      - name: Start QA platform
+        run: |
+          npm start > platform.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf "$QA_PLATFORM_URL/api/health" && break; sleep 2; done
+      - name: Sync and generate (no approve)
+        run: |
+          node api-tests/scripts/sync-and-generate.js \
+            --project "${{ vars.QA_PROJECT || 'PRJ-001' }}" \
+            ${{ github.event.inputs.jql && format('--jql "{0}"', github.event.inputs.jql) || '' }} \
+            ${{ github.event.inputs.allStories == 'true' && '--all' || '' }}
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-and-generate-log
+          path: platform.log
+          retention-days: 14

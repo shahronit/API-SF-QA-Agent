@@ -16,18 +16,20 @@ if (major < 22 || (major === 22 && minor < 5)) {
 registerSecrets(secretValues());
 
 require('./routes/core');
+require('./routes/endpoints');
 require('./routes/stories');
 require('./routes/tests');
 require('./routes/runs');
 require('./routes/defects');
 require('./routes/data');
 require('./routes/reports');
+require('./routes/workflow');
+require('./routes/http-lab');
 
 async function main() {
-  const { repo } = require('./db');
-  if (config.seedDemo && repo.count('projects') === 0) {
-    console.log('[seed] First start — creating demo projects, stories and execution history (about 20–40 s)…');
-    await require('./seed').seed({ log: (m) => console.log(`[seed] ${m}`) });
+  const retagged = require('./engine/salesforce-detect').retagExistingProjects();
+  if (retagged.length) {
+    console.log(`[org] Tagged ${retagged.length} project${retagged.length === 1 ? '' : 's'} as Experience Cloud B2B/B2C or SFCC B2B/B2C (separate orgs).`);
   }
   const server = http.createServer((req, res) => { handle(req, res); });
   server.requestTimeout = 120000;

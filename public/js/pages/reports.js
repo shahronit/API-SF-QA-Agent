@@ -1,7 +1,7 @@
 /* Reports: per-execution QA report preview and export (PDF, Excel, CSV, HTML). */
 (() => {
   const QA = window.QA;
-  const { h, raw, ic, fmt, badge, prov, on, errorBox, loading, empty, toastError, withBusy } = QA.ui;
+  const { h, ic, fmt, badge, prov, on, errorBox, loading, empty, toastError, withBusy } = QA.ui;
   const C = QA.components;
   const api = QA.api;
 
@@ -10,7 +10,9 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Reports' }]);
-      view.innerHTML = String(h`${C.pageHead('Reports', 'Execution reports for stakeholders. Credentials and tokens are masked in every format.')}<div data-body>${loading(8)}</div>`);
+      view.innerHTML = String(h`${C.pageHead('Reports', 'A stakeholder pack for one test run. Credentials and tokens are masked in every download.')}
+        ${C.pageIntro({ what: 'Pick a completed run, preview the summary, then download PDF, Excel, CSV or HTML.', next: 'Choose the execution in the list. If none exist yet, run tests first.' })}
+        <div data-body>${loading(8)}</div>`);
       const body = view.querySelector('[data-body]');
       let runs;
       try { runs = (await api.get(`/api/runs${api.qs({ projectId: p.id, pageSize: 50 })}`)).items; } catch (e) { body.innerHTML = String(errorBox(e)); return null; }
@@ -42,8 +44,12 @@
       </div>
       ${d.failed.length ? h`<div class="card mt"><div class="card-head"><h2>Failed tests</h2><span class="small muted">${d.failed.length}</span></div>${QA.ui.table({ rows: d.failed, columns: [
         { key: 'id', label: 'Test', render: (x) => h`<span class="mono small">${x.id}</span>` }, { key: 'title', label: 'Title', render: (x) => h`<div class="cell-title">${x.title}</div><div class="cell-sub mono">${x.endpoint}</div>` }, { key: 'statusCode', label: 'HTTP', render: (x) => C.statusCode(x.statusCode) },
-        { key: 'rootCause', label: 'Root cause', render: (x) => h`<span class="tag">${x.category || ''}</span><div class="small">${x.rootCause || ''}</div>` }, { key: 'defectKey', label: 'Defect', render: (x) => x.defectKey || h`<span class="faint small">None</span>` },
+        { key: 'rootCause', label: 'Root cause', render: (x) => h`<span class="tag">${x.classification || x.category || ''}</span><div class="small">${x.rootCause || ''}</div>${x.impact ? h`<div class="small muted">Impact: ${x.impact}</div>` : ''}${x.retest ? h`<div class="small muted">Retest: ${x.retest}</div>` : ''}` }, { key: 'defectKey', label: 'Defect', render: (x) => x.defectKey || h`<span class="faint small">None</span>` },
       ] })}</div>` : ''}
+      <div class="grid g-2 mt">
+        <div class="card"><div class="card-head"><h2>Risks</h2></div><div class="card-body"><ul class="list" style="margin:0">${(d.risks || []).map((x) => h`<li class="small" style="padding:6px 0"><span class="tag ${x.level === 'High' ? 'bad' : x.level === 'Medium' ? 'warn' : ''}">${x.level}</span> ${x.text}</li>`)}</ul></div></div>
+        <div class="card"><div class="card-head"><h2>Automation assets</h2></div><div class="card-body">${d.automationAssets ? C.kv([['Postman collection', h`<a href="${d.automationAssets.postmanCollection.url}" download>${d.automationAssets.postmanCollection.name}</a>`], ['Postman environment', h`<a href="${d.automationAssets.postmanEnvironment.url}" download>${d.automationAssets.postmanEnvironment.name}</a><div class="small muted">${d.automationAssets.postmanEnvironment.note}</div>`], ['Newman', h`<code class="mono small" style="word-break:break-all">${d.automationAssets.newmanCommand}</code>`], ['Automated tests', `${d.automationAssets.tests.automated} of ${d.automationAssets.tests.total} (${d.automationAssets.tests.regression} regression-tagged)`]]) : ''}</div></div>
+      </div>
       <div class="card mt"><div class="card-head"><h2>Endpoint health</h2></div>${QA.ui.table({ rows: d.endpoints, columns: [
         { key: 'endpoint', label: 'Endpoint', render: (x) => h`<code class="mono small" style="word-break:break-all">${x.endpoint}</code>` }, { key: 'health', label: 'Health', render: (x) => badge(x.health) },
         { key: 'total', label: 'Tests', cls: 'num' }, { key: 'failed', label: 'Failed', cls: 'num', render: (x) => (x.failed ? h`<span class="text-error">${x.failed}</span>` : '0') }, { key: 'avg', label: 'Avg', cls: 'num', render: (x) => fmt.ms(x.avg) }, { key: 'p95', label: 'p95', cls: 'num', render: (x) => fmt.ms(x.p95) },

@@ -41,6 +41,7 @@ test('template: interpolation, missing vars, JSONPath and dynamic values', () =>
   assert.ok(missing.has('nope'));
   assert.equal(getPath({ records: [{ Id: '001' }, { Id: '002' }] }, '$.records[1].Id'), '002');
   assert.equal(getPath({ records: [1, 2, 3] }, '$.records.length'), 3);
+  assert.deepEqual(getPath({ hits: [{ product_id: 'a' }, { product_id: 'b' }] }, '$.hits[*].product_id'), ['a', 'b']);
   assert.match(String(dynamicValue('$uuid')), /^[0-9a-f-]{36}$/);
   assert.match(String(dynamicValue('$randomEmail')), /@/);
 });

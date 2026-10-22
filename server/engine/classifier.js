@@ -20,6 +20,8 @@ const API_SIGNALS = [
   [/\b(integration|middleware|mulesoft|boomi|informatica|inbound|outbound)\b/i, 'describes a system integration'],
   [/\b(third[- ]party|external\s*system|erp|sap\b|payment\s*gateway|stripe|subscription\s*billing|shipping\s*provider)\b/i, 'integrates with an external system'],
   [/\b(create|update|delete|insert|upsert|query|retrieve|fetch)\w*\b.{0,30}\b(record|account|contact|lead|opportunity|case|order|contract|invoice|quote|asset|subscription)\b/i, 'describes record-level CRUD operations'],
+  [/\b(commerce cloud|sfcc|ocapi|scapi|shopper api|b2c storefront|product search|shopper basket|b2c commerce)\b/i, 'covers Salesforce Commerce Cloud storefront APIs'],
+  [/\b(experience cloud|digital experience|community (cloud|site)|b2b commerce|b2b lightning|cloudcraze|webstore)\b/i, 'covers Experience Cloud or B2B Commerce on Core'],
   [/\b(trigger|flow)\b.{0,30}\b(callout|http|rest|api)\b/i, 'describes automation making an HTTP callout'],
 ];
 

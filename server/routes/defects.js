@@ -5,7 +5,7 @@
  */
 const crypto = require('node:crypto');
 const { route, HttpError, required } = require('../http');
-const { repo, all, now, audit } = require('../db');
+const { repo, now, audit } = require('../db');
 const { jiraFor } = require('../connectors');
 const { buildDraft } = require('../engine/defects');
 const { maskDeep, maskText } = require('../lib/mask');

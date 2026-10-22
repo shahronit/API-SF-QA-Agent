@@ -1,8 +1,8 @@
 'use strict';
 /** Test execution: start/stop runs, stream progress (SSE), results, analysis, explorer. */
 const { route, HttpError, sse } = require('../http');
-const { repo, all, get, now, audit, nextId, decode } = require('../db');
-const { salesforceFor } = require('../connectors');
+const { repo, all, get, audit, decode } = require('../db');
+const { connectorFor, isCommerceRequest, isHttpRequest } = require('../connectors');
 const runner = require('../engine/runner');
 const { checkOperation, isProduction, PRODUCTION_WARNING } = require('../engine/safety');
 const { summarise } = require('../engine/analyzer');
@@ -11,7 +11,7 @@ const { interpolate } = require('../lib/template');
 const { maskDeep, maskHeaders } = require('../lib/mask');
 const { explainResponse } = require('../lib/errors');
 const { prioritise } = require('../engine/priority');
-const ai = require('../engine/ai');
+const { compareRuns, flakyTests, qualityGate } = require('../engine/run-compare');
 const { projectFrom, getProject, paginate, inFilter, likeFilter, dateRange } = require('./util');
 
 function selectTests(p, body) {
@@ -49,6 +49,14 @@ function withDependencies(p, tests) {
   return [...selected.values()].sort((a, b) => a.seq - b.seq);
 }
 
+/** Traceability of the latest approved proposal for the run's story (single-story runs only). */
+function traceabilityFor(p, tests) {
+  const keys = [...new Set(tests.map((t) => t.storyKey).filter(Boolean))];
+  if (keys.length !== 1) return null;
+  const [pr] = repo.find('proposals', "projectId = $p AND storyKey = $k AND status = 'approved'", { p: p.id, k: keys[0] }, 'ORDER BY decidedAt DESC LIMIT 1');
+  return (pr && pr.analysis && pr.analysis.traceability) || null;
+}
+
 route('POST', '/api/runs', (ctx) => {
   const p = projectFrom(ctx);
   const b = ctx.body;
@@ -80,7 +88,18 @@ route('POST', '/api/runs', (ctx) => {
     if (!tests.length) throw new HttpError(400, 'All selected tests modify data; nothing left to run in read-only mode.');
     audit('safety', b.confirmProductionWrites ? 'production.writes-confirmed' : 'production.read-only-run', { user: ctx.user, projectId: p.id, detail: { tests: tests.length, deletesConfirmed: Boolean(b.confirmDelete) } });
   }
-  const run = runner.startRun({ project: p, testCases: tests, user: ctx.user, options: { confirmProductionWrites: b.confirmProductionWrites, confirmDelete: b.confirmDelete, label: b.label, trigger: b.mode === 'failed' ? 'rerun-failed' : b.trigger || 'manual', filter: b.filter } });
+  const executor = ['playwright', 'postman', 'platform'].includes(String(b.executor || '').toLowerCase()) ? String(b.executor).toLowerCase() : 'auto';
+  const storyKeys = [].concat((b.filter && b.filter.storyKey) || b.storyKeys || []).filter(Boolean);
+  const run = runner.startRun({
+    project: p, testCases: tests, user: ctx.user,
+    options: {
+      confirmProductionWrites: b.confirmProductionWrites, confirmDelete: b.confirmDelete, label: b.label,
+      trigger: b.mode === 'failed' ? 'rerun-failed' : b.trigger || 'manual', filter: b.filter, executor,
+      postResultToJira: Boolean(b.postResultToJira),
+      storyKeys,
+      traceability: traceabilityFor(p, tests),
+    },
+  });
   return { ...run, testCaseIds: undefined };
 });
 
@@ -100,6 +119,26 @@ route('GET', '/api/runs/:id', (ctx) => {
   return { ...r, active: runner.isActive(r.id), jiraActivity: all("SELECT ts, user, action, detail FROM audit_log WHERE category = 'jira' AND detail LIKE $r ORDER BY ts", { r: `%${r.id}%` }).map((x) => decode('audit_log', x)) };
 });
 
+route('GET', '/api/runs/:id/compare', (ctx) => {
+  const cmp = compareRuns(ctx.params.id, ctx.query.baseline);
+  if (!cmp) throw new HttpError(404, `Execution ${ctx.params.id} not found.`);
+  if (ctx.query.baseline && ctx.query.baseline !== 'previous' && !cmp.baseline) throw new HttpError(404, `Baseline execution ${ctx.query.baseline} not found.`);
+  const ids = new Set(all('SELECT testCaseId FROM run_results WHERE runId = $r', { r: ctx.params.id }).map((x) => x.testCaseId));
+  return { ...cmp, flaky: flakyTests(repo.get('runs', ctx.params.id).projectId, { testCaseIds: ids }) };
+});
+
+route('GET', '/api/runs/:id/gate', (ctx) => {
+  const q = ctx.query;
+  const gate = qualityGate(ctx.params.id, { minPassRate: q.minPassRate, requireP0: q.requireP0, maxBlocked: q.maxBlocked, maxNewFailures: q.maxNewFailures, baseline: q.baseline });
+  if (!gate) throw new HttpError(404, `Execution ${ctx.params.id} not found.`);
+  return gate;
+});
+
+route('GET', '/api/flaky', (ctx) => {
+  const p = projectFrom(ctx);
+  return { projectId: p.id, window: Number(ctx.query.window) || 5, items: flakyTests(p.id, { window: ctx.query.window }) };
+});
+
 route('GET', '/api/runs/:id/results', (ctx) => {
   const r = repo.get('runs', ctx.params.id);
   if (!r) throw new HttpError(404, `Execution ${ctx.params.id} not found.`);
@@ -109,7 +148,7 @@ route('GET', '/api/runs/:id/results', (ctx) => {
   inFilter(where, params, 'testType', ctx.query.testType, 'tt');
   likeFilter(where, params, ['title', 'endpoint', 'testCaseId'], ctx.query.q);
   const page = paginate('run_results', ctx, { where, params, columns: 'id, runId, testCaseId, seq, title, method, endpoint, apiType, testType, priority, storyKey, status, statusCode, responseMs, sizeBytes, defectKey, correlationId, analysis, error, sfValidation', sortable: ['seq', 'status', 'responseMs', 'priority'], defaultSort: 'seq', defaultDir: 'ASC' });
-  page.items = page.items.map((x) => ({ ...x, reason: x.status !== 'passed' ? (x.analysis && x.analysis.rootCause) || (x.error && x.error.title) || null : null, sfValidation: x.sfValidation ? x.sfValidation.status : null, analysis: x.analysis ? { category: x.analysis.category, defectCandidate: x.analysis.defectCandidate } : null, error: undefined }));
+  page.items = page.items.map((x) => ({ ...x, reason: x.status !== 'passed' ? (x.analysis && x.analysis.rootCause) || (x.error && x.error.title) || null : null, sfValidation: x.sfValidation ? x.sfValidation.status : null, analysis: x.analysis ? { category: x.analysis.category, classification: x.analysis.classification, defectCandidate: x.analysis.defectCandidate } : null, error: undefined }));
   return page;
 });
 
@@ -156,38 +195,12 @@ route('GET', '/api/results/:id', (ctx) => {
 // ── API Explorer ──
 route('POST', '/api/explorer/execute', async (ctx) => {
   const p = projectFrom(ctx);
-  const b = ctx.body;
-  const method = String(b.method || 'GET').toUpperCase();
-  if (!b.path) throw new HttpError(400, 'Endpoint path is required.', { action: 'Enter a path such as /services/data/v{{apiVersion}}/limits' });
-  const safety = checkOperation(p, { method, path: b.path, body: b.body }, { confirmProductionWrites: b.confirmProductionWrites, confirmDelete: b.confirmDelete });
-  if (safety) throw new HttpError(409, safety.title, safety);
-  const sf = salesforceFor(p);
-  if (!sf.available) throw new HttpError(503, sf.unavailableExplanation().title, sf.unavailableExplanation());
-  const vars = { apiVersion: p.apiVersion, runId: 'explorer', ...((p.testDataConfig || {}).variables || {}), ...(b.variables || {}) };
-  const missing = new Set();
-  const path = interpolate(b.path, vars, missing);
-  let body; let bodyRaw;
-  if (typeof b.body === 'string' && b.body.trim()) {
-    const text = interpolate(b.body, vars, missing);
-    if (b.apiType === 'SOAP' || b.rawBody) bodyRaw = text; else { try { body = JSON.parse(text); } catch { bodyRaw = text; } }
-  } else if (b.body && typeof b.body === 'object') body = interpolate(b.body, vars, missing);
-  const headers = interpolate(b.headers || {}, vars, missing);
-  if (Object.keys(headers).some((h) => /^authorization$/i.test(h))) throw new HttpError(400, 'Remove the Authorization header — authentication is injected from the secret store.', { action: 'Choose an Auth mode instead.' });
-  const query = interpolate(b.query || {}, vars, missing);
-  const unresolved = [...missing].filter((m) => !m.startsWith('$') && m !== 'sessionId');
-  if (unresolved.length) throw new HttpError(400, `Unresolved variable(s): ${unresolved.map((v) => `{{${v}}}`).join(', ')}.`, { action: 'Provide values in the Variables panel.' });
+  const lab = require('../engine/http-lab');
   try {
-    const res = await sf.request({ method, path, headers, query, body, bodyRaw, auth: b.auth || 'default', apiType: b.apiType });
-    const assertions = b.assertions && b.assertions.length ? evaluate(interpolate(b.assertions, vars, new Set()), res) : [];
-    audit('explorer', 'request.executed', { user: ctx.user, projectId: p.id, detail: { method, path: path.split('?')[0], status: res.status, ms: res.timeMs } });
-    return {
-      request: { method, url: res.url, headers: maskHeaders(res.requestHeaders || headers), body: maskDeep(body !== undefined ? body : bodyRaw) },
-      response: { status: res.status, headers: maskHeaders(res.headers), body: maskDeep(res.body), timeMs: res.timeMs, sizeBytes: res.sizeBytes, correlationId: res.correlationId },
-      assertions, explanation: explainResponse({ status: res.status, body: res.body, method, url: res.url }),
-      demo: p.mode === 'demo',
-    };
+    return await lab.execute(p, ctx.body || {}, ctx.user);
   } catch (e) {
-    throw new HttpError(502, e.explanation ? e.explanation.title : e.message, e.explanation || {});
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(e.status || 502, e.message || (e.explanation && e.explanation.title) || 'Request failed', e.info || e.explanation || {});
   }
 });
 
@@ -209,7 +222,7 @@ route('POST', '/api/explorer/generate-test', (ctx) => {
   if (typeof b.body === 'string' && b.body.trim()) { try { body = JSON.parse(b.body); } catch { bodyRaw = b.body; } } else if (b.body && typeof b.body === 'object') body = b.body;
   const draft = {
     title: b.title || `${String(b.method || 'GET').toUpperCase()} ${String(b.path || '').split('?')[0].split('/').slice(-2).join('/')}`,
-    apiType: b.apiType || 'REST', method: String(b.method || 'GET').toUpperCase(), endpoint: String(b.path || '').replace(`/v${p.apiVersion}/`, '/v{{apiVersion}}/'),
+    apiType: b.apiType || (/^https?:\/\//i.test(String(b.path || '')) ? 'HTTP' : 'REST'), method: String(b.method || 'GET').toUpperCase(), endpoint: String(b.path || '').replace(`/v${p.apiVersion}/`, '/v{{apiVersion}}/'),
     query: b.query || {}, headers: b.headers || {}, body, bodyRaw, auth: b.auth || 'default', assertions,
     testType: (res.status || 200) >= 400 ? 'Negative' : 'Functional', label: 'ASSUMED', status: 'ready', storyKey: b.storyKey || null,
     description: 'Generated from an API Explorer request. Review assertions before adding to regression.',
@@ -220,7 +233,14 @@ route('POST', '/api/explorer/generate-test', (ctx) => {
 
 route('GET', '/api/explorer/templates', (ctx) => {
   const v = '/services/data/v{{apiVersion}}';
+  const { explorerTemplates } = require('../engine/endpoints');
+  const { getProject } = require('./util');
+  let projectOverlay = [];
+  if (ctx.query.projectId) {
+    try { projectOverlay = explorerTemplates(getProject(ctx.query.projectId)); } catch { projectOverlay = []; }
+  }
   return [
+    ...projectOverlay,
     { group: 'REST API', name: 'API versions', method: 'GET', path: '/services/data' },
     { group: 'REST API', name: 'Org limits', method: 'GET', path: `${v}/limits` },
     { group: 'REST API', name: 'Describe global', method: 'GET', path: `${v}/sobjects` },
@@ -233,6 +253,13 @@ route('GET', '/api/explorer/templates', (ctx) => {
     { group: 'Composite Graph API', name: 'Composite graph', method: 'POST', path: `${v}/composite/graph`, body: { graphs: [{ graphId: 'g1', compositeRequest: [{ method: 'POST', url: `/services/data/v{{apiVersion}}/sobjects/Account`, referenceId: 'a1', body: { Name: 'QA Graph' } }] }] } },
     { group: 'GraphQL API', name: 'GraphQL: first 5 Accounts', method: 'POST', path: `${v}/graphql`, body: { query: 'query { uiapi { query { Account(first: 5) { edges { node { Id Name { value } } } } } } }' } },
     { group: 'Bulk API 2.0', name: 'Create ingest job', method: 'POST', path: `${v}/jobs/ingest`, body: { object: 'Account', operation: 'insert', contentType: 'CSV', lineEnding: 'LF' } },
+    { group: 'Bulk API 2.0', name: 'Upload CSV to a job (replace JOB_ID)', method: 'PUT', path: `${v}/jobs/ingest/JOB_ID/batches`, headers: { 'Content-Type': 'text/csv' }, body: 'FirstName,LastName,Email\nQA,Bulk One,bulk1@example.com\nQA,Bulk Two,bulk2@example.com\n', note: 'Replace JOB_ID with the id returned by "Create ingest job". Expect HTTP 201.' },
+    { group: 'Bulk API 2.0', name: 'Close the job (replace JOB_ID)', method: 'PATCH', path: `${v}/jobs/ingest/JOB_ID`, body: { state: 'UploadComplete' } },
+    { group: 'Bulk API 2.0', name: 'Job status (replace JOB_ID)', method: 'GET', path: `${v}/jobs/ingest/JOB_ID` },
+    { group: 'Bulk API 2.0', name: 'Successful results (replace JOB_ID)', method: 'GET', path: `${v}/jobs/ingest/JOB_ID/successfulResults` },
+    { group: 'Bulk API 2.0', name: 'Failed results (replace JOB_ID)', method: 'GET', path: `${v}/jobs/ingest/JOB_ID/failedResults` },
+    { group: 'Bulk API 2.0', name: 'Unprocessed records (replace JOB_ID)', method: 'GET', path: `${v}/jobs/ingest/JOB_ID/unprocessedrecords` },
+    { group: 'Bulk API 2.0', name: 'List ingest jobs', method: 'GET', path: `${v}/jobs/ingest` },
     { group: 'Tooling API', name: 'Tooling: Apex classes', method: 'GET', path: `${v}/tooling/query`, query: { q: 'SELECT Id, Name, ApiVersion, Status FROM ApexClass LIMIT 20' } },
     { group: 'Tooling API', name: 'Tooling: validation rules', method: 'GET', path: `${v}/tooling/query`, query: { q: 'SELECT Id, ValidationName, Active, EntityDefinitionId FROM ValidationRule LIMIT 50' } },
     { group: 'Platform Events', name: 'Publish Order_Event__e', method: 'POST', path: `${v}/sobjects/Order_Event__e`, body: { Order_Number__c: 'ORD-{{$timestamp}}', Status__c: 'Submitted', Amount__c: 199.99 } },
@@ -240,9 +267,26 @@ route('GET', '/api/explorer/templates', (ctx) => {
     { group: 'Apex REST', name: 'Invoice (ERP → MuleSoft → SF)', method: 'POST', path: '/services/apexrest/v1/invoices', body: { invoiceNumber: 'INV-{{$timestamp}}', erpInvoiceId: 'SAP-{{$timestamp}}', accountExternalId: 'ERP-ACC-1001', amount: 2500, currency: 'USD', status: 'Issued' } },
     { group: 'Connect REST', name: 'Current user', method: 'GET', path: `${v}/chatter/users/me` },
     { group: 'OAuth', name: 'User info', method: 'GET', path: '/services/oauth2/userinfo' },
+    { group: 'OAuth', name: 'Token: client credentials (replace placeholders)', method: 'POST', path: '/services/oauth2/token', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET', note: 'Replace the placeholders with your connected app values only for a one-off check — never save real secrets into templates or saved requests.' },
+    { group: 'OAuth', name: 'Token: refresh token (replace placeholders)', method: 'POST', path: '/services/oauth2/token', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=refresh_token&client_id=YOUR_CLIENT_ID&refresh_token=YOUR_REFRESH_TOKEN', note: 'Placeholders only — do not store real refresh tokens here.' },
+    { group: 'OAuth', name: 'Token: JWT bearer (replace placeholders)', method: 'POST', path: '/services/oauth2/token', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=YOUR_SIGNED_JWT', note: 'The assertion is a JWT signed with your connected app certificate; generate it outside the browser.' },
+    { group: 'OAuth', name: 'Token: invalid grant_type (negative)', method: 'POST', path: '/services/oauth2/token', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=qa_not_a_grant&client_id=QA_PLACEHOLDER_CLIENT_ID', note: 'Expect HTTP 400 with error=unsupported_grant_type.' },
+    { group: 'OAuth', name: 'Revoke a token (replace placeholder)', method: 'POST', path: '/services/oauth2/revoke', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'token=YOUR_ACCESS_OR_REFRESH_TOKEN' },
     { group: 'SOAP API', name: 'getServerTimestamp (partner)', method: 'POST', apiType: 'SOAP', path: '/services/Soap/u/{{apiVersion}}', headers: { 'Content-Type': 'text/xml; charset=UTF-8', SOAPAction: '""' }, body: '<?xml version="1.0" encoding="utf-8"?>\n<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:partner.soap.sforce.com">\n  <soapenv:Header><urn:SessionHeader><urn:sessionId>{{sessionId}}</urn:sessionId></urn:SessionHeader></soapenv:Header>\n  <soapenv:Body><urn:getServerTimestamp/></soapenv:Body>\n</soapenv:Envelope>' },
+    { group: 'SOAP API', name: 'query (partner)', method: 'POST', apiType: 'SOAP', path: '/services/Soap/u/{{apiVersion}}', headers: { 'Content-Type': 'text/xml; charset=UTF-8', SOAPAction: '""' }, body: '<?xml version="1.0" encoding="utf-8"?>\n<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:partner.soap.sforce.com">\n  <soapenv:Header><urn:SessionHeader><urn:sessionId>{{sessionId}}</urn:sessionId></urn:SessionHeader></soapenv:Header>\n  <soapenv:Body><urn:query><urn:queryString>SELECT Id, Name FROM Account LIMIT 3</urn:queryString></urn:query></soapenv:Body>\n</soapenv:Envelope>' },
+    { group: 'SOAP API', name: 'Apex SOAP web service (replace ClassName / method)', method: 'POST', apiType: 'SOAP', path: '/services/Soap/class/ClassName', headers: { 'Content-Type': 'text/xml; charset=UTF-8', SOAPAction: '""' }, body: '<?xml version="1.0" encoding="utf-8"?>\n<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:cls="http://soap.sforce.com/schemas/class/ClassName">\n  <soapenv:Header><cls:SessionHeader><cls:sessionId>{{sessionId}}</cls:sessionId></cls:SessionHeader></soapenv:Header>\n  <soapenv:Body><cls:methodName><cls:arg>value</cls:arg></cls:methodName></soapenv:Body>\n</soapenv:Envelope>', note: 'Apex SOAP: an Apex class exposing `webservice static` methods. Replace ClassName and methodName with your own class — the WSDL is available from Setup → Apex Classes → Generate WSDL.' },
     { group: 'Change Data Capture', name: 'CDC: subscribe via Pub/Sub API', method: 'GET', path: `${v}/sobjects/ContactChangeEvent/describe`, note: 'CDC/Platform Event subscription uses the gRPC Pub/Sub API, which is outside this HTTP explorer. Use this describe to verify the channel exists, then validate downstream effects with SOQL.' },
     { group: 'Metadata API', name: 'Metadata API (SOAP)', method: 'POST', apiType: 'SOAP', path: '/services/Soap/m/{{apiVersion}}', headers: { 'Content-Type': 'text/xml; charset=UTF-8', SOAPAction: '""' }, body: '<?xml version="1.0" encoding="utf-8"?>\n<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:met="http://soap.sforce.com/2006/04/metadata">\n  <soapenv:Header><met:SessionHeader><met:sessionId>{{sessionId}}</met:sessionId></met:SessionHeader></soapenv:Header>\n  <soapenv:Body><met:listMetadata><met:queries><met:type>CustomObject</met:type></met:queries><met:asOfVersion>{{apiVersion}}</met:asOfVersion></met:listMetadata></soapenv:Body>\n</soapenv:Envelope>' },
+    { group: 'Commerce Cloud OCAPI', name: 'OCAPI: product search (live catalog)', method: 'GET', apiType: 'OCAPI', path: '/s/{{ccSiteId}}/dw/shop/v24_5/product_search', query: { q: 'a', count: 8 } },
+    { group: 'Commerce Cloud OCAPI', name: 'OCAPI: get product by id from search', method: 'GET', apiType: 'OCAPI', path: '/s/{{ccSiteId}}/dw/shop/v24_5/products/{{ocapiProductId}}', note: 'Set ocapiProductId from a product_search hit — do not invent a SKU.' },
+    { group: 'Commerce Cloud OCAPI', name: 'OCAPI: create basket', method: 'POST', apiType: 'OCAPI', path: '/s/{{ccSiteId}}/dw/shop/v24_5/baskets', body: {} },
+    { group: 'Commerce Cloud SCAPI', name: 'SCAPI: shopper product search', method: 'GET', apiType: 'SCAPI', path: '/search/shopper-search/v1/organizations/{{ccOrgId}}/product-search', query: { q: 'a', limit: 8 } },
+    { group: 'Commerce Cloud SCAPI', name: 'SCAPI: shopper product by id', method: 'GET', apiType: 'SCAPI', path: '/product/shopper-products/v1/organizations/{{ccOrgId}}/products/{{scapiProductId}}' },
+    { group: 'Commerce Cloud SCAPI', name: 'SLAS: client credentials token', method: 'POST', apiType: 'SCAPI', path: '/shopper/auth/v1/organizations/{{ccOrgId}}/oauth2/token', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=client_credentials', note: 'Client id/secret are injected from SFCC_<PREFIX>_* — do not paste them here. Browser login is not a SLAS token.' },
+    { group: 'Experience Cloud', name: 'Connect REST: list communities', method: 'GET', path: `${v}/connect/communities` },
+    { group: 'B2B Commerce', name: 'Commerce API: list web stores', method: 'GET', path: `${v}/commerce/webstores` },
+    { group: 'Frontend HTTP', name: 'GET frontend origin', method: 'GET', apiType: 'HTTP', path: '{{httpBaseUrl}}/', note: 'Set the frontend base URL on Connections → Postman / HTTP.' },
+    { group: 'Frontend HTTP', name: 'GET absolute URL (example)', method: 'GET', apiType: 'HTTP', path: 'https://httpbin.org/get', note: 'Replace with your BFF / middleware URL. Auth token comes from HTTP_<PREFIX>_TOKEN if set.' },
   ];
 });
 

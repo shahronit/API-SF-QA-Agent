@@ -6,18 +6,33 @@
   const S = QA.state;
   const $ = (id) => document.getElementById(id);
 
+  const WF_NAME = {
+    connect: '1. Connect', create: '2. Create tests', run: '3. Run', report: '4. Report',
+  };
   const NAV = [
-    { label: 'Core Workflow', items: [['/', 'Dashboard', 'dashboard'], ['/stories', 'Stories & Tests', 'bookmark'], ['/execution', 'Test Runs', 'play'], ['/defects', 'Defects', 'alert', 'defects']] },
-    { label: 'Testing', items: [['/testcases', 'Test Cases', 'list'], ['/explorer', 'API Explorer', 'code'], ['/contracts', 'API Contracts', 'file']] },
-    { label: 'Resources', items: [['/testdata', 'Test Data', 'database'], ['/automation', 'CI/CD', 'zap'], ['/projects', 'Projects', 'settings']] },
-    { label: 'Insights', items: [['/reports', 'Reports', 'chart'], ['/traceability', 'Traceability', 'tree'], ['/agent', 'AI Assistant', 'sparkles'], ['/logs', 'Audit Log', 'history']] },
+    { label: 'Start here', items: [['/projects/new', 'New project', 'plus'], ['/projects', 'All projects', 'folder'], ['/workflow', 'How QA works', 'layers']] },
+    { label: 'This project', items: [['/', 'Dashboard', 'dashboard'], ['/stories', 'Jira tickets', 'bookmark'], ['/testcases', 'Tests', 'list'], ['/execution', 'Run tests', 'play'], ['/defects', 'Defects', 'alert', 'defects'], ['/reports', 'Reports', 'chart']] },
+    { label: 'Tools', items: [['/explorer', 'Try an API', 'code'], ['/automation', 'HTTP / Postman', 'zap'], ['/traceability', 'Traceability', 'tree'], ['/agent', 'Ask the assistant', 'sparkles'], ['/logs', 'Audit log', 'history']] },
   ];
   const counts = { defects: 0 };
 
   function renderNav() {
     const path = QA.router.path;
-    const active = (href) => (href === '/' ? path === '/' || path === '/dashboard' : path === href || path.startsWith(`${href}/`) || (href === '/stories' && path.startsWith('/generate')) || (href === '/traceability' && path === '/regression'));
-    $('nav').innerHTML = String(h`${NAV.map((g) => h`<div class="nav-group"><div class="nav-label">${g.label}</div>${g.items.map(([href, label, icon, countKey]) => h`<a href="${href}" data-link class="${active(href) ? 'active' : ''}" ${active(href) ? raw('aria-current="page"') : ''}>${ic(icon)}<span>${label}</span>${countKey && counts[countKey] ? h`<span class="count" title="Open defects">${counts[countKey]}</span>` : ''}</a>`)}</div>`)}`);
+    const active = (href) => {
+      if (href === '/') return path === '/' || path === '/dashboard';
+      if (href === '/projects') return path === '/projects' || (path.startsWith('/projects/') && path !== '/projects/new');
+      if (href === '/projects/new') return path === '/projects/new';
+      return path === href || path.startsWith(`${href}/`) || (href === '/stories' && path.startsWith('/generate')) || (href === '/traceability' && path === '/regression');
+    };
+    const p = S.project;
+    const wf = p && p.workflow;
+    const wfHtml = wf ? h`<div class="nav-group"><div class="nav-label">Checklist for this project</div>${wf.steps.map((s) => {
+      const href = `/workflow/${s.id}`;
+      const on = path === href || (path === '/workflow' && s.id === wf.currentStep);
+      const m = (QA.workflow && QA.workflow.mark) ? QA.workflow.mark(s.status, on || s.id === wf.currentStep) : ic('circle', 'icon-sm');
+      return h`<a href="${href}" data-link class="wf-link ${on ? 'active' : ''}" ${on ? raw('aria-current="page"') : ''} title="${(s.help || s.label) + ' · ' + s.status.replace(/_/g, ' ')}">${m}<span class="truncate">${WF_NAME[s.id] || s.label}</span></a>`;
+    })}</div>` : '';
+    $('nav').innerHTML = String(h`<a class="nav-cta" href="/projects/new" data-link>${ic('plus')}<span>New project</span></a>${NAV.map((g) => h`<div class="nav-group"><div class="nav-label">${g.label}</div>${g.items.map(([href, label, icon, countKey]) => h`<a href="${href}" data-link class="${active(href) ? 'active' : ''} ${href === '/projects/new' ? 'nav-new' : ''}" ${active(href) ? raw('aria-current="page"') : ''} title="${label}">${ic(icon)}<span>${label}</span>${countKey && counts[countKey] ? h`<span class="count" title="Open defects">${counts[countKey]}</span>` : ''}</a>`)}</div>`)}${wfHtml}`);
   }
 
   function renderSidebarFoot() {
@@ -25,11 +40,17 @@
     const m = S.meta || {};
     const sf = p && p.connection ? p.connection.salesforce : null;
     const jira = p && p.connection ? p.connection.jira : null;
-    const dot = (s) => (s === 'connected' || s === 'configured' ? 'var(--success)' : s === 'demo' ? 'var(--warning)' : 'var(--error)');
-    $('sidebar-foot').innerHTML = String(h`${p ? h`<div class="stack" style="gap:4px">
-      <div class="row" style="gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:${dot(sf && sf.status)}"></span>Salesforce: ${sf ? sf.label : '–'}</div>
-      <div class="row" style="gap:6px"><span style="width:7px;height:7px;border-radius:50%;background:${dot(jira && jira.status)}"></span>Jira: ${jira ? jira.label : '–'}</div>
-      <div class="faint" style="margin-top:4px">v${m.version || ''} · metadata ${p.connection ? p.connection.metadataLabel : ''}</div></div>` : ''}`);
+    const pm = p && p.connection ? p.connection.postman : null;
+    const commerce = p && p.connection ? p.connection.commerce : null;
+    const short = (s) => ({ connected: 'Connected', configured: 'Ready', demo: 'Demo', off: 'Off', unavailable: 'Not connected' }[s && s.status] || (s && s.label) || '–');
+    const dotCls = (s) => (s === 'connected' || s === 'configured' ? 'ok' : s === 'demo' ? 'demo' : s === 'off' ? 'off' : 'bad');
+    $('sidebar-foot').innerHTML = String(h`${p ? h`<div class="conn-status">
+      <div class="conn-line"><span class="conn-dot ${dotCls(sf && sf.status)}"></span><span>Salesforce: ${short(sf)}</span></div>
+      <div class="conn-line"><span class="conn-dot ${dotCls(jira && jira.status)}"></span><span>Jira: ${short(jira)}</span></div>
+      <div class="conn-line"><span class="conn-dot ${dotCls(pm && pm.status)}"></span><span>HTTP / Postman: ${short(pm)}</span></div>
+      ${p.connection && p.connection.playwright && p.connection.playwright.status !== 'off' ? h`<div class="conn-line"><span class="conn-dot ${dotCls(p.connection.playwright.status)}"></span><span>Playwright: ${short(p.connection.playwright)}</span></div>` : ''}
+      ${commerce && commerce.status !== 'off' ? h`<div class="conn-line"><span class="conn-dot ${dotCls(commerce.status)}"></span><span>Commerce Cloud: ${short(commerce)}</span></div>` : ''}
+      <div class="faint conn-meta wrap">v${m.version || ''} · metadata ${p.connection ? p.connection.metadataLabel : ''}</div></div>` : ''}`);
   }
 
   function renderSwitchers() {
@@ -39,8 +60,8 @@
     const cur = S.project;
     const envFilter = S.envFilter || '';
     envSel.innerHTML = String(h`<option value="">All environments</option>${order.filter((e) => envs.includes(e)).map((e) => h`<option value="${e}" ${e === envFilter ? 'selected' : ''}>${e}</option>`)}`);
-    const list = S.projects.filter((p) => !envFilter || p.environment === envFilter);
-    $('project-switch').innerHTML = String(list.length ? h`${list.map((p) => h`<option value="${p.id}" ${cur && p.id === cur.id ? 'selected' : ''}>${p.name} · ${p.environment}</option>`)}` : h`<option value="">No projects</option>`);
+    const list = S.projects;
+    $('project-switch').innerHTML = String(h`${list.length ? list.map((p) => h`<option value="${p.id}" ${cur && p.id === cur.id ? 'selected' : ''}>${p.name} · ${p.environment}</option>`) : h`<option value="">No projects yet</option>`}<option value="__new__">+ New project…</option>`);
   }
 
   function renderEnvBand() {
@@ -84,7 +105,7 @@
     $('notif-btn').innerHTML = ic('bell') + (unread ? '<span class="dot"></span>' : '');
     $('notif-btn').setAttribute('aria-label', unread ? `Notifications (${unread} unread)` : 'Notifications');
     $('notif-pop').innerHTML = String(h`<div class="popover-head"><span>Notifications</span>${list.length ? h`<button class="btn xs ghost" data-clear>Clear</button>` : ''}</div>
-      <div style="max-height:380px;overflow-y:auto">${list.length ? list.map((n) => h`<div class="notif"><div class="row" style="gap:6px"><b>${n.title}</b><span class="spacer"></span><span class="when">${fmt.ago(n.at)}</span></div><div class="small muted">${raw(String(n.message instanceof QA.ui.Safe ? n.message : esc(n.message)))}</div></div>`) : h`<div class="empty" style="padding:28px 16px">${ic('bell')}<p>Run completions, defects and errors appear here.</p></div>`}</div>`);
+      <div class="notif-list">${list.length ? list.map((n) => h`<div class="notif"><div class="row wrap"><b>${n.title}</b><span class="spacer"></span><span class="when">${fmt.ago(n.at)}</span></div><div class="small muted wrap">${raw(String(n.message instanceof QA.ui.Safe ? n.message : esc(n.message)))}</div></div>`) : h`<div class="empty compact">${ic('bell')}<p>Run completions, defects and errors appear here.</p></div>`}</div>`);
   }
 
   // ── Command palette (⌘K) ──
@@ -166,7 +187,10 @@
     });
     document.addEventListener('click', (e) => { if (!e.target.closest('#notif-pop') && !e.target.closest('#notif-btn')) $('notif-pop').classList.add('hidden'); });
     on($('notif-pop'), 'click', '[data-clear]', () => { S.notifications = []; renderNotifs(); });
-    $('project-switch').addEventListener('change', (e) => { if (e.target.value) S.setProject(e.target.value); });
+    $('project-switch').addEventListener('change', (e) => {
+      if (e.target.value === '__new__') { e.target.value = S.projectId || ''; QA.router.go('/projects/new'); return; }
+      if (e.target.value) S.setProject(e.target.value);
+    });
     $('env-switch').addEventListener('change', (e) => {
       S.envFilter = e.target.value;
       const first = S.projects.find((p) => !S.envFilter || p.environment === S.envFilter);
@@ -179,7 +203,7 @@
       // Project-scoped pages re-render; detail routes return to their list.
       const cur = QA.router.current;
       if (!cur) return;
-      const listPath = { '/stories/:key': '/stories', '/generate/:id': '/stories', '/execution/:runId': '/execution', '/testcases/:id': '/testcases', '/defects/:id': '/defects' }[cur.pattern];
+      const listPath = { '/stories/:key': '/stories', '/generate/:id': '/stories', '/execution/:runId': '/execution', '/testcases/:id': '/testcases', '/defects/:id': '/defects', '/workflow/:step': '/workflow', '/projects/new': '/projects/new' }[cur.pattern];
       if (listPath) QA.router.go(listPath); else QA.router.render();
     });
     S.on('projects', renderChrome);

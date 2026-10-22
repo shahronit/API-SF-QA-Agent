@@ -12,13 +12,15 @@
       QA.router.setCrumbs([{ label: 'Dashboard' }]);
       const S = QA.state;
       const f = {
-        scope: ctx.query.scope || 'project', range: ctx.query.range ?? '14',
+        scope: ctx.query.scope || 'all', range: ctx.query.range ?? '14',
         environment: ctx.query.environment || '', apiType: ctx.query.apiType || '', testType: ctx.query.testType || '', priority: ctx.query.priority || '', sprint: ctx.query.sprint || '',
+        sfOrg: ctx.query.sfOrg || '', jiraProject: ctx.query.jiraProject || '', status: ctx.query.status || '',
       };
       if (!S.project && f.scope === 'project') f.scope = 'all';
 
-      view.innerHTML = String(h`${C.pageHead('Dashboard', f.scope === 'project' && S.project ? `Quality of ${S.project.name} (${S.project.environment}) across Salesforce APIs.` : 'Quality across all active projects and environments.',
-        h`<button class="btn" data-act="refresh">${ic('refresh')} Refresh</button>${S.project ? h`<button class="btn primary" data-act="run">${ic('play')} Run tests</button>` : ''}`)}
+      view.innerHTML = String(h`${C.pageHead('Dashboard', f.scope === 'project' && S.project ? `Health of ${S.project.name} (${S.project.environment}) — pass rate, failures and recent runs.` : 'Health across every project. Switch to a project in the top bar to focus.',
+        h`<a class="btn" href="/projects/new" data-link>${ic('plus')} New project</a><button class="btn" data-act="refresh">${ic('refresh')} Refresh</button>${S.project ? h`<button class="btn primary" data-act="run">${ic('play')} Run tests</button>` : ''}`)}
+        ${C.pageIntro({ what: 'A snapshot of quality for the project in the top bar. KPIs, the latest run and open defects live here.', next: S.project ? 'If this is a new workspace, open How QA works in the sidebar. To run tests already approved, click Run tests.' : 'Create a project first — that unlocks tickets, tests and runs.' })}
         <div class="card" style="margin-bottom:16px"><div class="toolbar" data-filters></div></div>
         <div data-body>${loading(10)}</div>`);
 
@@ -30,6 +32,9 @@
             <button class="btn sm ${f.scope === 'all' ? 'on' : ''}" data-scope="all">All projects</button></div>
           ${f.scope === 'all' ? sel('environment', 'All environments', meta.environments) : ''}
           ${sel('apiType', 'All API types', meta.apiTypes)}${sel('testType', 'All test types', meta.testTypes)}${sel('priority', 'All priorities', meta.priorities)}
+          ${sel('status', 'All statuses', ['passed', 'failed', 'blocked', 'skipped'])}
+          ${opts && opts.orgs && opts.orgs.length ? sel('sfOrg', 'All Salesforce orgs', opts.orgs) : ''}
+          ${opts && opts.jiraProjects && opts.jiraProjects.length ? sel('jiraProject', 'All Jira projects', opts.jiraProjects) : ''}
           ${opts && opts.sprints.length ? sel('sprint', 'All sprints', opts.sprints) : ''}
           <span class="spacer"></span>
           <select class="select" data-f="range" aria-label="Date range">${RANGES.map(([v, l]) => h`<option value="${v}" ${f.range === v ? 'selected' : ''}>${l}</option>`)}</select>`);
@@ -40,7 +45,7 @@
       async function load() {
         const body = view.querySelector('[data-body]');
         body.style.opacity = '.6';
-        const q = { projectId: f.scope === 'project' && S.project ? S.project.id : '', environment: f.scope === 'all' ? f.environment : '', apiType: f.apiType, testType: f.testType, priority: f.priority, sprint: f.sprint, from: f.range ? isoDaysAgo(Number(f.range)) : '' };
+        const q = { projectId: f.scope === 'project' && S.project ? S.project.id : '', environment: f.scope === 'all' ? f.environment : '', apiType: f.apiType, testType: f.testType, priority: f.priority, sprint: f.sprint, sfOrg: f.sfOrg, jiraProjectKey: f.jiraProject, status: f.status, from: f.range ? isoDaysAgo(Number(f.range)) : '' };
         try {
           const d = await QA.api.get(`/api/dashboard${QA.api.qs(q)}`);
           if (!alive) return;
@@ -69,17 +74,19 @@
     const run = d.recentRuns[0];
     const tone = (v, good, warn) => (v === null ? '' : v >= good ? 'ok' : v >= warn ? 'warn' : 'bad');
     if (!k.results && !d.recentRuns.length) {
-      return h`<div class="card">${empty({ icon: 'play', title: 'Get started with API testing', text: 'Follow the workflow below to test your Salesforce APIs.',
-        action: h`<div style="display:flex;gap:8px"><a class="btn" href="/stories" data-link>${ic('bookmark')} 1. Add stories</a><a class="btn primary" href="/stories" data-link>${ic('sparkles')} 2. Generate tests</a><a class="btn" href="/execution" data-link>${ic('play')} 3. Run tests</a></div>` })}</div>`;
+      return h`<div class="card">${empty({ icon: 'play', title: 'Nothing has run yet', text: 'Create a project (or pick one), pull Jira tickets, generate tests, then run them. How QA works walks through each step.',
+        action: h`<div class="workflow-guide"><a class="btn primary" href="/projects/new" data-link>${ic('plus')} New project</a><a class="btn" href="/workflow" data-link>${ic('layers')} How QA works</a><a class="btn" href="/stories" data-link>${ic('bookmark')} Jira tickets</a></div>` })}</div>`;
     }
     return h`
-      <div class="kpis" style="--cols:6">
+      <div class="kpis" style="--cols:8">
+        ${kpi('Projects', fmt.num(k.totalProjects), { foot: `${fmt.num(k.activeProjects)} active`, href: '/projects' })}
+        ${kpi('API tests', fmt.num(k.apiTests), { href: '/testcases' })}
+        ${kpi('Test runs', fmt.num(k.testRuns), { href: '/execution' })}
         ${kpi('Pass rate', k.passRate === null ? '–' : fmt.num(k.passRate), { unit: k.passRate === null ? '' : '%', tone: tone(k.passRate, 95, 85), foot: `${fmt.num(k.results)} results` })}
-        ${kpi('Failure rate', k.failureRate === null ? '–' : fmt.num(k.failureRate), { unit: k.failureRate === null ? '' : '%', tone: k.failureRate > 10 ? 'bad' : k.failureRate > 3 ? 'warn' : '', foot: 'APIs above 10%', href: '/insights?failureRate=10' })}
+        ${kpi('Failed tests', fmt.num(k.failed || 0), { tone: k.failed ? 'bad' : '', href: '/execution' })}
         ${kpi('Open defects', fmt.num(k.openDefects), { tone: k.criticalDefects ? 'bad' : '', foot: k.criticalDefects ? `${k.criticalDefects} critical` : 'None critical', href: '/defects' })}
+        ${kpi('Critical defects', fmt.num(k.criticalDefects), { tone: k.criticalDefects ? 'bad' : '', href: '/defects' })}
         ${kpi('API health', k.apiHealth === null ? '–' : fmt.num(k.apiHealth), { unit: k.apiHealth === null ? '' : '%', tone: tone(k.apiHealth, 95, 80), foot: `${k.healthyEndpoints} of ${k.endpoints} endpoints healthy`, title: 'Share of endpoints whose latest result passed' })}
-        ${kpi('Avg response', k.avgResponseMs === null ? '–' : fmt.num(k.avgResponseMs), { unit: k.avgResponseMs === null ? '' : 'ms', foot: 'Across executed requests' })}
-        ${kpi('Blocked', fmt.num(k.blocked), { tone: k.blocked ? 'warn' : '', foot: 'Need configuration' })}
       </div>
       <div class="stat-inline mt"><span><b>${fmt.num(k.totalProjects)}</b> projects (${fmt.num(k.activeProjects)} active)</span><span><b>${fmt.num(k.apiTests)}</b> API tests</span><span><b>${fmt.num(k.testRuns)}</b> test runs</span></div>
 

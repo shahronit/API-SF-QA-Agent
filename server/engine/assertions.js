@@ -1,12 +1,14 @@
 'use strict';
 /**
  * Assertion engine. Each assertion → { assertion, expected, actual, result: PASS|FAIL, message }.
- * Supported types: status, jsonpath, header, responseTime, sfError, schema, bodyContains.
+ * Supported types: status, jsonpath, header, responseTime, sfError, schema, bodyContains, csv.
+ * `csv` reads a text/csv body (Bulk API 2.0 results): path `rows` (data-row count), `header` (column names) or `column:NAME` (values).
  * Operators: eq, neq, in, exists, notExists, contains, notContains, matches, type, lt, lte, gt, gte.
  */
 const { getPath, typeOf } = require('../lib/template');
 const { validate } = require('../lib/jsonschema');
 const { sfErrors } = require('../lib/errors');
+const csvLib = require('../lib/csv');
 
 function deepEqual(a, b) {
   if (a === b) return true;
@@ -48,6 +50,7 @@ function describeAssertion(a) {
     case 'sfError': return `Salesforce errorCode ${OP_TEXT[a.op || 'eq']} ${a.expected}`;
     case 'schema': return 'Response body matches JSON schema';
     case 'bodyContains': return `Body contains "${a.expected}"`;
+    case 'csv': return `CSV ${a.path} ${OP_TEXT[a.op || 'eq']}${['exists', 'notExists'].includes(a.op) ? '' : ' ' + JSON.stringify(a.expected)}`;
     default: return a.type;
   }
 }
@@ -76,6 +79,18 @@ function evaluate(assertions, res) {
           break;
         }
         case 'bodyContains': actual = res.text; break;
+        case 'csv': {
+          const parsed = csvLib.parse(res.text || '');
+          const p = String(a.path || 'rows');
+          if (p === 'rows') actual = parsed.records.length;
+          else if (p === 'header') actual = parsed.header;
+          else if (p.startsWith('column:')) {
+            const col = p.slice(7);
+            if (!parsed.header.includes(col)) throw new Error(`CSV has no column "${col}" (columns: ${parsed.header.join(', ') || 'none'})`);
+            actual = parsed.records.map((r) => r[col]);
+          } else throw new Error(`Unknown csv path "${p}" (use rows, header or column:NAME)`);
+          break;
+        }
         case 'schema': {
           const errors = validate(a.expected, res.body);
           out.actual = errors.length ? `${errors.length} violation(s)` : 'valid';

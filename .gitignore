@@ -9,3 +9,4 @@ api-tests/environments/*.local.json
 *.pem
 *.key
 .DS_Store
+graphify-out/

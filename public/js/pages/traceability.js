@@ -1,7 +1,7 @@
 /* Traceability (story → scenario → case → execution → result → defect) and regression impact. */
 (() => {
   const QA = window.QA;
-  const { h, ic, fmt, badge, prov, pri, method, on, errorBox, loading, empty, toast, toastError, withBusy, esc } = QA.ui;
+  const { h, ic, fmt, badge, prov, pri, method, on, errorBox, loading, empty, withBusy } = QA.ui;
   const C = QA.components;
   const api = QA.api;
 
@@ -15,7 +15,9 @@
   async function renderTrace(view, ctx) {
     const p = QA.state.project;
     QA.router.setCrumbs([{ label: 'Traceability' }]);
-    view.innerHTML = String(h`${C.pageHead('Traceability', 'Every requirement traced to scenarios, test cases, the latest execution, its result and any defect.', h`<a class="btn" href="/regression" data-link>${ic('target')} Regression impact</a>`)}<div data-body>${loading(10)}</div>`);
+    view.innerHTML = String(h`${C.pageHead('Traceability', 'See the chain from a Jira ticket → scenarios → tests → latest run → result → defect.', h`<a class="btn" href="/regression" data-link>${ic('target')} What a change would hit</a>`)}
+      ${C.pageIntro({ what: 'Coverage map for this project. Gaps (ticket with no tests, or tests with no recent run) show up here.', next: 'Scan the table for missing links. Use “What a change would hit” if a story or object changed and you need the P0 pack.' })}
+      <div data-body>${loading(10)}</div>`);
     let d;
     try { d = await api.get(`/api/traceability?projectId=${p.id}`); } catch (e) { view.querySelector('[data-body]').innerHTML = String(errorBox(e)); return null; }
     const m = d.metrics;
@@ -75,7 +77,8 @@
     QA.router.setCrumbs([{ label: 'Traceability', href: '/traceability' }, { label: 'Regression impact' }]);
     let objects = [];
     try { objects = (await api.get(`/api/projects/${p.id}/sobjects`, { cacheMs: 300000 })).objects.map((o) => o.name); } catch { /* manual entry still works */ }
-    view.innerHTML = String(h`${C.pageHead('Regression impact', 'Pick what changed — a story, objects or endpoints. Impacted tests are ranked by priority, and the P0 regression pack is always included.')}
+    view.innerHTML = String(h`${C.pageHead('What a change would hit', 'Name the ticket, objects or endpoints that changed. We rank the tests that should re-run, and always include the P0 pack.')}
+      ${C.pageIntro({ what: 'A “what should I re-run?” helper. It does not change Salesforce.', next: 'Enter a story key like DEMO-102, tick changed objects, then Find impacted tests. Start a run from the result list if you want to execute them.' })}
       <div class="grid g-12"><div class="card" style="align-self:start"><div class="card-head"><h2>What changed?</h2></div><div class="card-body stack">
         <label class="field"><span>Story key</span><input class="input mono" name="story" value="${ctx.query.story || ''}" placeholder="e.g. DEMO-102"><small>Objects mentioned in the story are added automatically.</small></label>
         <div class="field"><span>Changed objects</span>${objects.length ? C.chipGroup('obj', objects, (ctx.query.objects || '').split(',')) : h`<input class="input mono" name="objtext" placeholder="Account, Contact">`}</div>

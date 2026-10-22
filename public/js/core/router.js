@@ -4,7 +4,8 @@
   const QA = window.QA;
   const ROUTES = [
     ['/', 'dashboard'], ['/dashboard', 'dashboard'],
-    ['/projects', 'projects'], ['/projects/:id', 'projects'],
+    ['/workflow', 'workflow'], ['/workflow/:step', 'workflow'],
+    ['/projects/new', 'projects'], ['/projects', 'projects'], ['/projects/:id', 'projects'],
     ['/explorer', 'explorer'],
     ['/stories', 'stories'], ['/stories/:key', 'stories'], ['/generate/:id', 'stories'],
     ['/scenarios', 'scenarios'],

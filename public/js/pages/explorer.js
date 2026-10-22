@@ -1,7 +1,7 @@
 /* API explorer: request builder for every Salesforce API, object discovery, SOQL, save/convert to test. */
 (() => {
   const QA = window.QA;
-  const { h, raw, ic, fmt, badge, prov, method, on, errorBox, loading, empty, toast, toastError, withBusy, esc, modal, json, debounce } = QA.ui;
+  const { h, raw, ic, fmt, badge, prov, method, on, errorBox, loading, empty, toast, toastError, withBusy, modal, debounce } = QA.ui;
   const C = QA.components;
   const api = QA.api;
 
@@ -12,73 +12,121 @@
       const p = QA.state.project;
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'API explorer' }]);
-      const state = { side: ctx.query.object ? 'objects' : 'templates', req: { method: 'GET', path: '/services/data/v{{apiVersion}}/limits', auth: 'default', headers: '', query: '', body: '', variables: '', apiType: 'REST' }, last: null, object: ctx.query.object || null };
+      const HC = QA.httpClient;
+      const state = { layer: ctx.query.layer === 'frontend' ? 'frontend' : 'backend', side: ctx.query.object ? 'objects' : 'templates', req: { method: 'GET', path: '/services/data/v{{apiVersion}}/limits', auth: 'default', headers: '', query: '', body: '', variables: '', apiType: 'REST', bodyMode: 'json' }, last: null, object: ctx.query.object || null };
 
-      view.innerHTML = String(h`${C.pageHead('API explorer', h`Send requests to ${p.name} (${p.environment}). Authentication is injected from the secret store; the Authorization header is never shown or accepted.`)}
+      view.innerHTML = String(h`${C.pageHead('Try an API', h`${C.layerTag(state.layer)} ${p.name} (${p.environment}). Salesforce session tokens stay on the server. Generic HTTP requests can use Bearer, Basic, API key or OAuth 2.0.`, h`<a class="btn" href="/workflow/postman" data-link>${ic('folder')} Open collection</a>`)}
+        ${C.pageIntro({ what: 'Backend APIs are Salesforce org REST, Apex REST, Bulk and Composite. Frontend / HTTP is a Postman-style client: full URLs, auth helpers, cookies, scripts, environments, WebSocket, gRPC and local mocks.', next: state.layer === 'frontend' ? 'Paste an https URL (or import cURL), pick an environment, and Send. Collections, history, cookies and mocks are in the left sidebar.' : 'Pick a Salesforce template or object on the left, click Send, then Save as test if the call is useful. Production writes ask you to confirm.' })}
         ${C.connectionNotice(p)}
-        <div class="split" style="grid-template-columns:280px minmax(0,1fr)">
+        <div class="mt" style="margin-bottom:var(--space-4)">${C.tabs([{ id: 'backend', label: 'Backend · Salesforce' }, { id: 'frontend', label: 'Frontend · HTTP / Postman' }], state.layer, 'data-layer')}</div>
+        <div data-layer-pane="frontend" class="${state.layer === 'frontend' ? '' : 'hidden'}"><div data-fe>${loading(6)}</div></div>
+        <div data-layer-pane="backend" class="${state.layer === 'backend' ? '' : 'hidden'}">
+        <div class="split">
           <aside class="card" style="align-self:start;position:sticky;top:72px;max-height:calc(100vh - 96px);overflow:auto">
             <div class="toolbar" style="padding:8px">${C.tabs([{ id: 'templates', label: 'Templates' }, { id: 'saved', label: 'Saved' }, { id: 'objects', label: 'Objects' }], state.side, 'data-side')}</div>
             <div data-side-body>${loading(8)}</div>
           </aside>
           <div class="stack" style="min-width:0">
-            <div class="card"><div class="card-body">
-              <div class="row" style="gap:8px;flex-wrap:wrap">
-                <select class="select" name="method" aria-label="Method" style="width:110px">${['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'HEAD'].map((m) => h`<option>${m}</option>`)}</select>
-                <input class="input mono" name="path" aria-label="Endpoint path" style="flex:1;min-width:260px">
-                <select class="select" name="auth" aria-label="Authentication" style="width:190px">${[['default', 'Integration user'], ['lowpriv', 'Low-privilege user'], ['none', 'No token'], ['invalid', 'Invalid token']].map(([v, l]) => h`<option value="${v}">${l}</option>`)}</select>
-                <button class="btn primary" data-act="send">${ic('send')} Send</button>
+            <div class="card"><div class="card-body" data-sf-builder></div>
+              <div class="card-body" style="padding-top:0">
+                <label class="field"><span>Variables (JSON, merged with the active environment)</span><textarea class="input mono" name="variables" rows="3" placeholder='{ "accountId": "001..." }'></textarea></label>
+                <div class="row mt" style="gap:8px"><span class="small muted" data-reqhint></span><span class="spacer"></span><button class="btn sm" data-act="save">${ic('plus')} Save request</button><button class="btn sm" data-act="save-ep">${ic('code')} Save as endpoint</button><button class="btn sm" data-act="totest" disabled>${ic('wand')} Create test case from response</button></div>
               </div>
-              <div class="mt" data-reqtabs>${C.tabs([{ id: 'body', label: 'Body' }, { id: 'query', label: 'Query' }, { id: 'headers', label: 'Headers' }, { id: 'variables', label: 'Variables' }], 'body', 'data-rt')}</div>
-              ${['body', 'query', 'headers', 'variables'].map((k) => h`<div data-rp="${k}" class="${k === 'body' ? '' : 'hidden'}"><textarea class="input mono" rows="${k === 'body' ? 10 : 5}" name="${k}" spellcheck="false" placeholder="${{ body: 'JSON, XML (SOAP) or CSV body', query: '{ "q": "SELECT Id FROM Account LIMIT 5" }', headers: '{ "Sforce-Call-Options": "client=qa-platform" } — no Authorization header', variables: '{ "accountId": "001..." }  — {{apiVersion}} and {{$uuid}} etc. resolve automatically' }[k]}"></textarea></div>`)}
-              <div class="row mt" style="gap:8px"><span class="small muted" data-reqhint></span><span class="spacer"></span><button class="btn sm" data-act="save">${ic('plus')} Save request</button><button class="btn sm" data-act="totest" disabled>${ic('wand')} Create test case from response</button></div>
-            </div></div>
+            </div>
             <div class="card" data-response>${empty({ icon: 'send', title: 'No request sent yet', text: 'Choose a template or object on the left, or type an endpoint, then click Send.' })}</div>
           </div>
+        </div>
         </div>`);
 
+      const backendRoot = view.querySelector('[data-layer-pane="backend"]');
+      const sfBuilder = view.querySelector('[data-sf-builder]');
+      sfBuilder.innerHTML = String(HC.builderHtml(state.req, { sf: true }));
       const f = (n) => view.querySelector(`[name=${n}]`);
       const setReq = (r) => {
         Object.assign(state.req, r);
-        f('method').value = state.req.method; f('path').value = state.req.path; f('auth').value = state.req.auth || 'default';
-        for (const k of ['body', 'query', 'headers', 'variables']) f(k).value = J(state.req[k]);
-        view.querySelector('[data-reqhint]').textContent = state.req.note || (state.req.apiType ? `API type: ${state.req.apiType}` : '');
+        const q = r.query && typeof r.query === 'object' && !Array.isArray(r.query) ? r.query : undefined;
+        const hd = r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers) ? r.headers : undefined;
+        HC.apply(sfBuilder, {
+          ...state.req,
+          body: typeof state.req.body === 'string' ? state.req.body : J(state.req.body),
+          queryRows: q ? HC.objRows(q) : state.req.queryRows,
+          headerRows: hd ? HC.objRows(hd) : state.req.headerRows,
+          bodyMode: state.req.bodyMode || (state.req.apiType === 'SOAP' ? 'xml' : (state.req.apiType === 'GraphQL' ? 'graphql' : 'json')),
+        });
+        if (f('variables') && state.req.variables !== undefined) f('variables').value = J(state.req.variables);
+        view.querySelector('[data-reqhint]').textContent = state.req.note || (state.req.apiType ? `Backend API · ${state.req.apiType}` : 'Backend API · Salesforce');
       };
+      HC.bindBuilder(sfBuilder, {
+        onSend: async (el) => {
+          let b;
+          try { b = await collect(); } catch (err) { toastError(err, 'Request not sent'); return; }
+          const box = backendRoot.querySelector('[data-response]');
+          try {
+            const r = await C.withProductionSafety((conf) => api.post(`/api/explorer/execute?projectId=${p.id}`, { ...b, ...conf }));
+            if (!r) return;
+            state.last = { req: b, res: r };
+            backendRoot.querySelector('[data-act=totest]').disabled = false;
+            drawResponse(box, r);
+          } catch (err) { box.innerHTML = String(h`<div class="card-body">${errorBox(err)}</div>`); }
+        },
+      });
       setReq(state.req);
-      on(view, 'click', '[data-rt]', (e, el) => { view.querySelector('[data-reqtabs]').innerHTML = String(C.tabs([{ id: 'body', label: 'Body' }, { id: 'query', label: 'Query' }, { id: 'headers', label: 'Headers' }, { id: 'variables', label: 'Variables' }], el.dataset.rt, 'data-rt')); view.querySelectorAll('[data-rp]').forEach((x) => x.classList.toggle('hidden', x.dataset.rp !== el.dataset.rt)); });
+      on(view, 'click', '[data-layer]', (e, el) => {
+        state.layer = el.dataset.layer;
+        QA.router.setQuery({ layer: state.layer === 'backend' ? '' : 'frontend', object: state.layer === 'backend' ? (state.object || '') : '' });
+        view.querySelectorAll('[data-layer]').forEach((b) => { b.classList.toggle('on', b === el); b.setAttribute('aria-selected', b === el); });
+        view.querySelectorAll('[data-layer-pane]').forEach((pane) => pane.classList.toggle('hidden', pane.dataset.layerPane !== state.layer));
+        if (state.layer === 'frontend') drawFrontend();
+      });
+      async function drawFrontend() {
+        const box = view.querySelector('[data-fe]');
+        if (!box) return;
+        box.innerHTML = '';
+        HC.mountFrontend(box, p, ctx);
+      }
+      if (state.layer === 'frontend') drawFrontend();
 
       // Sidebar
-      const sideBody = view.querySelector('[data-side-body]');
+      const sideBody = backendRoot.querySelector('[data-side-body]');
       let templates = []; let saved = []; let objects = null;
       async function drawSide() {
-        view.querySelector('[data-side]') && (view.querySelector('aside .toolbar').innerHTML = String(C.tabs([{ id: 'templates', label: 'Templates' }, { id: 'saved', label: 'Saved' }, { id: 'objects', label: 'Objects' }], state.side, 'data-side')));
+        backendRoot.querySelector('[data-side]') && (backendRoot.querySelector('aside .toolbar').innerHTML = String(C.tabs([{ id: 'templates', label: 'Templates' }, { id: 'saved', label: 'Saved' }, { id: 'objects', label: 'Objects' }], state.side, 'data-side')));
         try {
           if (state.side === 'templates') {
-            if (!templates.length) templates = await api.get('/api/explorer/templates', { cacheMs: 600000 });
+            if (!templates.length) templates = await api.get(`/api/explorer/templates?projectId=${encodeURIComponent(p.id)}`, { cacheMs: 30000 });
             const groups = templates.reduce((m, t, i) => { (m[t.group] = m[t.group] || []).push({ ...t, i }); return m; }, {});
-            sideBody.innerHTML = String(h`<div class="side-list">${Object.entries(groups).map(([g, items]) => h`<div class="side-group">${g}</div>${items.map((t) => h`<button class="item" data-tpl="${t.i}">${method(t.method)}<span class="truncate">${t.name}</span></button>`)}`)}</div>`);
+            sideBody.innerHTML = String(h`<div class="side-list">${Object.entries(groups).map(([g, items]) => h`<div class="side-group">${g}</div>${items.map((t) => h`<button class="item" data-tpl="${t.i}" title="${t.name}">${method(t.method)}<span class="truncate">${t.name}</span></button>`)}`)}</div>`);
           } else if (state.side === 'saved') {
             saved = await api.get(`/api/requests?projectId=${p.id}`);
             const groups = saved.reduce((m, t) => { (m[t.collection || 'Default'] = m[t.collection || 'Default'] || []).push(t); return m; }, {});
-            sideBody.innerHTML = String(saved.length ? h`<div class="side-list">${Object.entries(groups).map(([g, items]) => h`<div class="side-group">${g}</div>${items.map((t) => h`<div class="item" style="display:flex;gap:6px;align-items:center"><button class="btn ghost xs" style="flex:1;justify-content:flex-start;min-width:0" data-saved="${t.id}">${method(t.method)}<span class="truncate">${t.name}</span></button><button class="btn ghost xs" data-delsaved="${t.id}" aria-label="Delete ${t.name}">${ic('x')}</button></div>`)}`)}</div>` : empty({ icon: 'inbox', title: 'No saved requests', text: 'Use "Save request" to keep requests for reuse.' }));
+            sideBody.innerHTML = String(saved.length ? h`<div class="side-list">${Object.entries(groups).map(([g, items]) => h`<div class="side-group">${g}</div>${items.map((t) => h`<div class="item" style="display:flex;gap:6px;align-items:center"><button class="btn ghost xs" style="flex:1;justify-content:flex-start;min-width:0" data-saved="${t.id}" title="${t.name}">${method(t.method)}<span class="truncate">${t.name}</span></button><button class="btn ghost xs" data-delsaved="${t.id}" aria-label="Delete ${t.name}">${ic('x')}</button></div>`)}`)}</div>` : empty({ icon: 'inbox', title: 'No saved requests', text: 'Use "Save request" to keep requests for reuse.' }));
           } else {
             if (!objects) objects = await api.get(`/api/projects/${p.id}/sobjects`, { cacheMs: 300000 });
             sideBody.innerHTML = String(h`<div style="padding:8px"><input class="input search" type="search" placeholder="Filter objects" data-objq aria-label="Filter objects"><div class="small muted mt-s">${prov(objects.label)} ${objects.source}</div></div><div class="side-list" data-objlist>${raw(objList(''))}</div>`);
           }
         } catch (e) { sideBody.innerHTML = String(h`<div class="card-body">${errorBox(e, { compact: true })}</div>`); }
       }
-      const objList = (q) => String(h`${objects.objects.filter((o) => !q || `${o.name} ${o.label}`.toLowerCase().includes(q.toLowerCase())).map((o) => h`<button class="item ${state.object === o.name ? 'on' : ''}" data-obj="${o.name}"><span class="truncate">${o.label}</span><span class="faint small mono" style="margin-left:auto">${o.name}</span></button>`)}`);
+      const objList = (q) => String(h`${objects.objects.filter((o) => !q || `${o.name} ${o.label}`.toLowerCase().includes(q.toLowerCase())).map((o) => h`<button class="item ${state.object === o.name ? 'on' : ''}" data-obj="${o.name}" title="${o.label} (${o.name})"><span class="truncate">${o.label}</span><span class="faint small mono" style="margin-left:auto">${o.name}</span></button>`)}`);
       on(view, 'click', '[data-side]', (e, el) => { state.side = el.dataset.side; drawSide(); });
       on(sideBody, 'input', '[data-objq]', debounce((e) => { sideBody.querySelector('[data-objlist]').innerHTML = objList(e.target.value); }, 150));
-      on(sideBody, 'click', '[data-tpl]', (e, el) => { const t = templates[Number(el.dataset.tpl)]; setReq({ method: t.method, path: t.path, body: t.body || '', query: t.query || '', headers: t.headers || '', apiType: t.apiType || t.group, note: t.note || `${t.group} · ${t.name}`, auth: 'default' }); });
-      on(sideBody, 'click', '[data-saved]', (e, el) => { const t = saved.find((x) => x.id === el.dataset.saved); setReq({ method: t.method, path: t.path, body: t.body || '', query: t.query || '', headers: t.headers || '', auth: t.auth, apiType: t.apiType, note: `Saved: ${t.name}` }); });
+      on(sideBody, 'click', '[data-tpl]', (e, el) => {
+        const t = templates[Number(el.dataset.tpl)];
+        const gql = /graphql/i.test(`${t.group || ''} ${t.apiType || ''}`) || (t.body && typeof t.body === 'object' && t.body.query);
+        setReq({
+          method: t.method, path: t.path, body: gql ? '' : (t.body || ''), query: t.query || '', headers: t.headers || '',
+          apiType: t.apiType || t.group, note: t.note || `${t.group} · ${t.name}`, auth: 'default',
+          bodyMode: gql ? 'graphql' : (/soap/i.test(`${t.group || ''} ${t.apiType || ''}`) ? 'xml' : (t.body ? 'json' : 'none')),
+          graphql: gql ? (typeof t.body === 'object' ? t.body : { query: t.body || '' }) : undefined,
+        });
+      });
+      on(sideBody, 'click', '[data-saved]', (e, el) => { const t = saved.find((x) => x.id === el.dataset.saved); setReq({ method: t.method, path: t.path, body: t.body || '', query: t.query || '', headers: t.headers || '', auth: t.auth, apiType: t.apiType, note: `Saved: ${t.name}`, ...(t.extra || {}) }); });
       on(sideBody, 'click', '[data-delsaved]', async (e, el) => { try { await api.del(`/api/requests/${el.dataset.delsaved}`); toast('Saved request deleted.', 'warn'); drawSide(); } catch (err) { toastError(err); } });
       on(sideBody, 'click', '[data-obj]', (e, el) => { state.object = el.dataset.obj; QA.router.setQuery({ object: state.object }); sideBody.querySelectorAll('[data-obj]').forEach((b) => b.classList.toggle('on', b === el)); describeObject(state.object); });
       drawSide();
 
       // Object describe panel (replaces response area)
       async function describeObject(name) {
-        const box = view.querySelector('[data-response]');
+        const box = backendRoot.querySelector('[data-response]');
         box.innerHTML = String(loading(8));
         try {
           const d = await api.get(`/api/projects/${p.id}/sobjects/${encodeURIComponent(name)}`, { cacheMs: 300000 });
@@ -126,39 +174,49 @@
         } catch (e) { toastError(e, 'Could not load result'); }
       }
 
-      const parse = (k, label) => { const t = f(k).value.trim(); if (!t) return undefined; try { return JSON.parse(t); } catch (e) { throw Object.assign(new Error(`${label} must be valid JSON: ${e.message}`), { info: { action: `Fix the ${label} tab.` } }); } };
-      const collect = () => ({ method: f('method').value, path: f('path').value.trim(), auth: f('auth').value, headers: parse('headers', 'Headers') || {}, query: parse('query', 'Query') || {}, variables: parse('variables', 'Variables') || {}, body: f('body').value, apiType: state.req.apiType });
+      const collect = async () => {
+        const b = await HC.collect(sfBuilder);
+        b.apiType = state.req.apiType || (/^https?:\/\//i.test(b.path) ? 'HTTP' : 'REST');
+        if (f('variables') && f('variables').value.trim()) {
+          try { b.variables = JSON.parse(f('variables').value); } catch (e) { throw Object.assign(new Error(`Variables must be valid JSON: ${e.message}`), { info: { action: 'Fix the Variables JSON.' } }); }
+        }
+        if (b.bodyMode === 'graphql' && b.graphql && b.graphql.query && !b.graphql.query.includes('{')) {
+          /* keep as typed */
+        }
+        return b;
+      };
 
-      on(view, 'click', '[data-act=send]', (e, el) => withBusy(el, async () => {
+      view.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && state.layer === 'backend') sfBuilder.querySelector('[data-act=send]').click(); });
+
+      on(view, 'click', '[data-act=save-ep]', (e, el) => withBusy(el, async () => {
+        if (state.layer !== 'backend') return;
         let b;
-        try { b = collect(); } catch (err) { toastError(err, 'Request not sent'); return; }
-        const box = view.querySelector('[data-response]');
+        try { b = await collect(); } catch (err) { toastError(err); return; }
         try {
-          const r = await C.withProductionSafety((conf) => api.post(`/api/explorer/execute?projectId=${p.id}`, { ...b, ...conf }));
-          if (!r) return;
-          state.last = { req: b, res: r };
-          view.querySelector('[data-act=totest]').disabled = false;
-          drawResponse(box, r);
-        } catch (err) { box.innerHTML = String(h`<div class="card-body">${errorBox(err)}</div>`); }
+          const r = await api.post(`/api/projects/${p.id}/endpoints`, { method: b.method, path: b.path, body: b.body });
+          if (r.added === 0) toast('That path is already an endpoint (or it is a standard REST / Experience / SFCC path, which is not stored here).', 'warn');
+          else toast('Saved as a project endpoint. Generate tests will pick it up when the story matches.', 'ok');
+          templates = [];
+        } catch (err) { toastError(err, 'Not saved as endpoint'); }
       }));
-      view.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') view.querySelector('[data-act=send]').click(); });
-
-      on(view, 'click', '[data-act=save]', () => {
+      on(view, 'click', '[data-act=save]', async () => {
+        if (state.layer !== 'backend') return;
         let b;
-        try { b = collect(); } catch (err) { toastError(err); return; }
+        try { b = await collect(); } catch (err) { toastError(err); return; }
         modal({
           title: 'Save request', body: h`<div class="form-grid"><label class="field"><span>Name</span><input class="input" name="sname" value="${b.method} ${fmt.shortPath(b.path)}"></label><label class="field"><span>Collection</span><input class="input" name="scoll" value="Default"></label></div>`,
           foot: h`<button class="btn" data-close>Cancel</button><button class="btn primary" data-go>Save</button>`,
           onMount(el, close) {
             el.querySelector('[data-go]').addEventListener('click', async () => {
-              let body = b.body; try { body = b.body.trim() ? JSON.parse(b.body) : null; } catch { /* keep raw */ }
-              try { await api.post(`/api/requests?projectId=${p.id}`, { name: el.querySelector('[name=sname]').value, collection: el.querySelector('[name=scoll]').value, method: b.method, path: b.path, headers: b.headers, query: b.query, body, auth: b.auth, apiType: b.apiType }); close(); toast('Request saved.', 'ok'); if (state.side === 'saved') drawSide(); } catch (err) { toastError(err); }
+              let body = b.body; try { body = typeof b.body === 'string' && b.body.trim() ? JSON.parse(b.body) : b.body; } catch { /* keep raw */ }
+              try { await api.post(`/api/requests?projectId=${p.id}`, { name: el.querySelector('[name=sname]').value, collection: el.querySelector('[name=scoll]').value, method: b.method, path: b.path, headers: b.headers, query: b.query, body, auth: b.auth, apiType: b.apiType, extra: { bodyMode: b.bodyMode, authConfig: b.authConfig, preRequest: b.preRequest, tests: b.tests, queryRows: b.queryRows, headerRows: b.headerRows, form: b.form, graphql: b.graphql } }); close(); toast('Request saved.', 'ok'); if (state.side === 'saved') drawSide(); } catch (err) { toastError(err); }
             });
           },
         });
       });
 
       on(view, 'click', '[data-act=totest]', (e, el) => withBusy(el, async () => {
+        if (state.layer !== 'backend') return;
         if (!state.last) return;
         try {
           const draft = await api.post(`/api/explorer/generate-test?projectId=${p.id}`, { ...state.last.req, response: state.last.res.response });
@@ -184,8 +242,11 @@
   function drawResponse(box, r) {
     const res = r.response;
     const x = r.explanation || {};
-    const view = C.exchangeView({ request: r.request, response: res, assertions: r.assertions, correlationId: res.correlationId, status: res.status < 400 ? 'passed' : 'failed' });
-    box.innerHTML = String(h`<div class="card-head"><h2>Response</h2><div class="row" style="gap:14px"><span>${C.statusCode(res.status)}</span><span class="small muted">${fmt.ms(res.timeMs)} · ${fmt.bytes(res.sizeBytes)}</span>${r.demo ? h`<span class="badge demo">Demo org</span>` : ''}</div></div>
+    const extra = [];
+    if (r.cookies && r.cookies.length) extra.push({ id: 'cookies', label: 'Cookies', html: C.kv(r.cookies.map((c) => [`${c.name}`, `${c.value} · ${c.domain}${c.path}${c.httpOnly ? ' · httpOnly' : ''}`])) });
+    if (r.console && r.console.length) extra.push({ id: 'console', label: 'Console', html: h`<pre class="console-log">${r.console.map((l) => `[${l.level}] ${l.source}: ${l.message}`).join('\n')}</pre>` });
+    const view = C.exchangeView({ request: r.request, response: res, assertions: r.assertions, correlationId: res.correlationId, status: res.status < 400 && !(r.assertions || []).some((a) => a.result === 'FAIL') ? 'passed' : 'failed' }, { extraTabs: extra });
+    box.innerHTML = String(h`<div class="card-head"><h2>Response</h2><div class="row" style="gap:14px"><span>${C.statusCode(res.status)}</span><span class="small muted">${fmt.ms(res.timeMs)} · ${fmt.bytes(res.sizeBytes)}</span>${r.demo ? h`<span class="badge demo">Demo org</span>` : ''}${(r.assertions || []).length ? h`<span class="small">${(r.assertions || []).filter((a) => a.result === 'PASS').length}/${r.assertions.length} tests passed</span>` : ''}</div></div>
       ${res.status >= 400 && x.title ? h`<div class="card-body" style="padding-bottom:0">${errorBox({ message: `${x.code ? `${x.code}: ` : ''}${x.title}`, info: x })}</div>` : ''}
       <div class="card-body">${view.html}</div>`);
     view.bind(box);

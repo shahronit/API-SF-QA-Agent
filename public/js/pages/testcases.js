@@ -11,8 +11,9 @@
       if (!p) { view.innerHTML = String(C.projectRequired()); return null; }
       QA.router.setCrumbs([{ label: 'Test Cases' }]);
       const m = QA.state.meta;
-      view.innerHTML = String(h`${C.pageHead('Test Cases', `Browse, edit, and execute API tests. Run them against ${p.name}.`,
+      view.innerHTML = String(h`${C.pageHead('Tests', `API tests for ${p.name}. Tick rows to run a subset, or open a row to edit it.`,
         h`<button class="btn" data-act="new">${ic('plus')} New test</button><button class="btn primary" data-act="run">${ic('play')} Run selected</button>`)}
+        ${C.pageIntro({ what: 'Every generated or hand-written API test for this project. Filters on the toolbar narrow by priority, type and last result. Tick rows to delete one or many.', next: 'Generate from a Jira ticket, an integration doc, or both. To run: tick the rows you want (or none for the dialog defaults) and click Run selected.' })}
         <div class="card" style="margin-bottom:12px" data-bulk hidden><div class="card-body row wrap" style="gap:10px;padding:10px 14px">
           <b data-selcount></b><span class="spacer"></span>
           <button class="btn sm primary" data-bulk-act="run">${ic('play')} Run selected</button>
@@ -68,6 +69,27 @@
   };
 
   const J = (v) => (v === undefined || v === null ? '' : JSON.stringify(v, null, 2));
+  function importedExtra(ex) {
+    if (!ex || typeof ex !== 'object') return '';
+    const bits = [
+      ex.folder ? ['Folder', ex.folder] : null,
+      ex.originalUrl ? ['Original URL', ex.originalUrl] : null,
+      ex.bodyMode ? ['Body mode', ex.bodyMode] : null,
+      ex.collectionName ? ['Collection', ex.collectionName] : null,
+      ex.auth && ex.auth.type ? ['Auth type', ex.auth.type] : null,
+    ].filter(Boolean);
+    const block = (title, value) => value ? h`<label class="field full"><span>${title}</span><pre class="code" style="max-height:180px;overflow:auto">${typeof value === 'string' ? value : J(value)}</pre></label>` : '';
+    return h`<div class="callout info mt" style="display:block"><div class="small wrap"><b>Imported request details</b>
+      ${bits.length ? C.kv(bits) : ''}
+      ${block('Form data', ex.formData)}
+      ${block('URL-encoded body', ex.urlencoded)}
+      ${block('GraphQL', ex.graphql)}
+      ${block('Pre-request script', ex.preRequest)}
+      ${block('Tests script', ex.tests)}
+      ${block('Examples', ex.examples)}
+      ${ex.description ? h`<p class="small mt wrap">${ex.description}</p>` : ''}
+    </div></div>`;
+  }
   function parseJson(text, label, fallback) {
     if (!String(text).trim()) return fallback;
     try { return JSON.parse(text); } catch (e) { throw Object.assign(new Error(`${label} is not valid JSON: ${e.message}`), { info: { action: `Fix the JSON in the ${label} field.` } }); }
@@ -116,6 +138,7 @@
         <label class="field full"><span>Body (JSON)</span><textarea class="input mono" rows="10" name="body" spellcheck="false">${J(t.body)}</textarea></label>
         ${t.bodyRaw ? h`<label class="field full"><span>Raw body (XML/CSV)</span><textarea class="input mono" rows="8" name="bodyRaw" spellcheck="false">${t.bodyRaw}</textarea></label>` : ''}
         <label class="field full"><span>Extract variables (JSON)</span><textarea class="input mono" rows="3" name="extract" spellcheck="false">${J(t.extract || [])}</textarea><small>e.g. <code>[{"var":"accountId","path":"$.id"}]</code></small></label>
+        ${t.extra ? importedExtra(t.extra) : ''}
       </div></div>
       <div data-p="assertions" class="hidden"><label class="field"><span>Assertions (JSON array)</span><textarea class="input mono" rows="18" name="assertions" spellcheck="false">${J(t.assertions || [])}</textarea>
         <small>Types: status, jsonpath, header, responseTime, sfError, schema, bodyContains. Operators: eq, neq, in, exists, notExists, contains, notContains, matches, type, lt, lte, gt, gte.</small></label></div>

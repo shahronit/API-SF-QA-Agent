@@ -7,17 +7,21 @@
 
   // ── Layout helpers ──
   const pageHead = (title, sub, actions) => h`<div class="page-head"><div><h1>${title}</h1>${sub ? h`<p>${sub}</p>` : ''}</div>${actions ? h`<div class="page-actions">${actions}</div>` : ''}</div>`;
+  const pageIntro = ({ what, next } = {}) => (what || next) ? h`<div class="page-intro" role="note"><div class="page-intro-grid">${what ? h`<div><div class="page-intro-k">What this screen is</div><div class="wrap">${what}</div></div>` : ''}${next ? h`<div><div class="page-intro-k">What you should do</div><div class="wrap">${next}</div></div>` : ''}</div></div>` : '';
   const tabs = (items, active, attr = 'data-tab') => h`<div class="tabs" role="tablist">${items.map((t) => h`<button class="tab ${t.id === active ? 'on' : ''}" role="tab" aria-selected="${t.id === active}" ${raw(`${attr}="${esc(t.id)}"`)}>${t.label}${t.n !== undefined && t.n !== null ? h`<span class="n">${t.n}</span>` : ''}</button>`)}</div>`;
   const kv = (pairs) => h`<dl class="kv">${pairs.filter(Boolean).map(([k, v]) => h`<dt>${k}</dt><dd>${v === undefined || v === null || v === '' ? raw('<span class="faint">–</span>') : v}</dd>`)}</dl>`;
-  const endpoint = (m, path) => h`<span class="endpoint">${m ? method(m) : ''} <code class="mono small">${fmt.shortPath(path)}</code></span>`;
+  const endpoint = (m, path) => h`<span class="endpoint wrap">${m ? method(m) : ''} <code class="mono small">${fmt.shortPath(path)}</code></span>`;
   const statusCode = (c) => (c ? h`<span class="num ${c >= 500 ? 'text-error' : c >= 400 ? 'text-warn' : 'text-ok'}">${c}</span>` : h`<span class="faint">–</span>`);
-  const projectRequired = () => empty({ icon: 'folder', title: 'No project selected', text: 'Create a project to configure a Salesforce org, Jira project and environment.', action: h`<a class="btn primary" href="/projects" data-link>${ic('plus')} Create project</a>` });
+  const projectRequired = () => empty({ icon: 'folder', title: 'Start with a project', text: 'A project is one Salesforce org (backend APIs) + HTTP/Postman collections (frontend APIs) + one environment (QA, UAT, Production). Create one to unlock stories, tests and runs.', action: h`<a class="btn primary" href="/projects/new" data-link>${ic('plus')} Create a project</a><a class="btn" href="/projects" data-link>See existing projects</a>` });
+  const layerTag = (kind) => kind === 'frontend'
+    ? h`<span class="layer-tag frontend">Frontend / HTTP APIs</span>`
+    : h`<span class="layer-tag backend">Backend APIs</span>`;
 
   /** Banner showing Salesforce connection availability for the current project. */
   function connectionNotice(project) {
     if (!project || !project.connection) return '';
     const s = project.connection.salesforce;
-    if (s.status === 'unavailable') return h`<div class="callout warn">${ic('alert')}<div><b>Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled.</b><div class="small mt-s">${s.reason || 'Configure the credential environment variables for this project and restart the server.'}</div></div></div>`;
+    if (s.status === 'unavailable') return h`<div class="callout warn">${ic('alert')}<div><b class="wrap">Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled.</b><div class="small mt-s wrap">${s.reason || 'Connect a Salesforce org (OAuth) and/or an MCP server on Projects → Connect Salesforce, then Test connections.'} <a href="/projects/${project.id}?tab=connection" data-link>Open Connect Salesforce</a></div></div></div>`;
     return '';
   }
 
@@ -116,8 +120,11 @@
   function analysisView(a, err) {
     if (!a && !err) return empty({ icon: 'spark', title: 'No analysis', text: 'Analysis is produced for failed and blocked tests.' });
     const x = a || {};
+    const href = x.href || (err && err.href);
+    const actionLabel = x.actionLabel || (err && err.actionLabel) || 'Open Connections';
     return h`<div class="row wrap" style="gap:8px;margin-bottom:10px"><b>${x.category || (err && err.title) || 'Failure'}</b>${prov(x.label)}${x.confidence ? h`<span class="tag">confidence: ${x.confidence}</span>` : ''}</div>
-      ${kv([['Root cause', x.rootCause || (err && err.cause)], ['Evidence', (x.evidence || (err && err.evidence) || []).length ? h`<ul class="list">${[].concat(x.evidence || err.evidence).map((e) => h`<li class="small">${e}</li>`)}</ul>` : null], ['Recommended action', x.action || (err && err.action)]])}`;
+      ${kv([['Classification', x.classification], ['Failure', x.failure], ['Root cause', x.rootCause || (err && err.cause)], ['Evidence', (x.evidence || (err && err.evidence) || []).length ? h`<ul class="list">${[].concat(x.evidence || err.evidence).map((e) => h`<li class="small">${e}</li>`)}</ul>` : null], ['Impact', x.impact], ['Recommendation', x.recommendation || x.action || (err && err.action)], ['Retest', x.retest]])}
+      ${href ? h`<div class="form-actions mt"><a class="btn primary" href="${href}" data-link>${actionLabel}</a></div>` : ''}`;
   }
 
   /** Tabs for a single exchange. Returns { html, bind(el) }. */
@@ -277,6 +284,24 @@
     });
   }
 
+  function runnerPicker(p) {
+    const runners = (p && p.connection && p.connection.runners) || {};
+    const rows = [
+      ['platform', 'Platform', 'Built-in runner. Always available. Masking, retries and Salesforce checks stay on.'],
+      ['playwright', 'Playwright MCP', runners.playwright && runners.playwright.available ? 'ExecuteAutomation Playwright MCP (playwright_get / post / put / patch / delete).' : 'Not connected — set it on Connections → Playwright MCP.'],
+      ['postman', 'Postman MCP', runners.postman && runners.postman.available ? 'Runs the synced collection in Postman.' : 'Not connected — set it on Connections → Postman / HTTP.'],
+    ];
+    const preferred = (runners.playwright && runners.playwright.available) ? 'playwright'
+      : (runners.postman && runners.postman.available) ? 'postman' : 'platform';
+    return h`<div class="field"><span>How should this run execute?</span>
+      <select class="select" name="executor">${rows.map(([id, label, help]) => {
+        const avail = id === 'platform' || (runners[id] && runners[id].available);
+        return h`<option value="${id}" ${id === preferred ? 'selected' : ''} ${avail ? '' : 'disabled'}>${label}${avail ? '' : ' (connect first)'}</option>`;
+      })}</select>
+      <small>${rows.find((r) => r[0] === preferred)[2]} <a href="/projects/${p.id}?tab=connection" data-link>Connections</a></small>
+    </div>`;
+  }
+
   /** Dialog to pick a run selection (priority / type / story) and start it. */
   function runDialog({ preset = {}, title = 'Run tests' } = {}) {
     const m = QA.state.meta;
@@ -289,7 +314,9 @@
         <label class="field"><span>Story keys (comma separated, optional)</span><input class="input" name="storyKey" value="${[].concat(preset.storyKey || []).join(', ')}" placeholder="e.g. DEMO-101, DEMO-102"></label>
         <label class="field"><span>Run label</span><input class="input" name="label" value="${preset.label || ''}" placeholder="e.g. Sprint 24 regression"></label>
         <label class="check-row"><input type="checkbox" name="deps" checked> Include upstream setup tests that produce required variables</label>
-        <p class="small muted">Empty filters run every ready test in the project. Drafts and disabled tests are skipped.</p></div>`,
+        <label class="check-row"><input type="checkbox" name="postResultToJira" ${preset.postResultToJira ? 'checked' : ''}> After the run, post a pass/fail comment on the Jira story (not a defect)</label>
+        ${runnerPicker(p)}
+        <p class="small muted">Empty filters run every ready test. Drafts and disabled tests are skipped. Production writes still need confirmation.</p></div>`,
       foot: h`<button class="btn" data-close>Cancel</button><button class="btn primary" data-go>${ic('play')} Start run</button>`,
       onMount(el, close) {
         const sel = { priority: new Set([].concat(preset.priority || [])), testType: new Set([].concat(preset.testType || [])) };
@@ -300,12 +327,14 @@
           if (sel.priority.size) filter.priority = [...sel.priority];
           if (sel.testType.size) filter.testType = [...sel.testType];
           if (sk.length) filter.storyKey = sk;
-          const run = await startRun({ filter, label: el.querySelector('[name=label]').value || undefined, resolveDependencies: el.querySelector('[name=deps]').checked, testCaseIds: preset.testCaseIds }, e.currentTarget);
+          const execEl = el.querySelector('[name=executor]');
+          const postResult = el.querySelector('[name=postResultToJira]') && el.querySelector('[name=postResultToJira]').checked;
+          const run = await startRun({ filter, label: el.querySelector('[name=label]').value || undefined, resolveDependencies: el.querySelector('[name=deps]').checked, testCaseIds: preset.testCaseIds, executor: execEl ? execEl.value : 'auto', postResultToJira: postResult }, e.currentTarget);
           if (run) close();
         });
       },
     });
   }
 
-  QA.components = { pageHead, tabs, kv, endpoint, statusCode, chipGroup, listController, exchangeView, openResult, defectPreview, withProductionSafety, startRun, runDialog, connectionNotice, projectRequired, headersTable, bodyView, assertionsView, sfValidationView, analysisView };
+  QA.components = { pageHead, pageIntro, tabs, kv, endpoint, statusCode, chipGroup, listController, exchangeView, openResult, defectPreview, withProductionSafety, startRun, runDialog, connectionNotice, projectRequired, layerTag, headersTable, bodyView, assertionsView, sfValidationView, analysisView };
 })();

@@ -26,7 +26,7 @@ function validateTestCase(t, partial = false) {
   if (/authorization"\s*:\s*"(?!\s*Bearer\s*\{\{)/i.test(headerStr)) throw new HttpError(400, 'Do not hard-code Authorization headers in test cases.', { action: 'Authentication is injected at runtime from the secret store. Use the Auth setting (default/none/invalid/lowpriv) instead.' });
 }
 
-const EDITABLE = ['title', 'description', 'apiType', 'method', 'endpoint', 'auth', 'headers', 'query', 'body', 'bodyRaw', 'assertions', 'extract', 'sfValidation', 'contractRef', 'cleanup', 'timeoutMs', 'object', 'testType', 'priority', 'status', 'label', 'tags', 'storyKey', 'scenarioId', 'seq', 'automated'];
+const EDITABLE = ['title', 'description', 'apiType', 'method', 'endpoint', 'auth', 'headers', 'query', 'body', 'bodyRaw', 'assertions', 'extract', 'sfValidation', 'contractRef', 'cleanup', 'timeoutMs', 'object', 'testType', 'priority', 'status', 'label', 'tags', 'storyKey', 'scenarioId', 'seq', 'automated', 'extra'];
 
 // ── Scenarios ──
 route('GET', '/api/scenarios', (ctx) => {
@@ -139,12 +139,22 @@ route('POST', '/api/testcases/:id/duplicate', (ctx) => {
   return repo.get('test_cases', id);
 });
 
+function dropEmptyScenario(scenarioId) {
+  if (!scenarioId) return false;
+  const n = get('SELECT COUNT(*) AS n FROM test_cases WHERE scenarioId = $s', { s: scenarioId }).n;
+  if (n) return false;
+  const s = repo.get('scenarios', scenarioId);
+  if (s) repo.remove('scenarios', s.id);
+  return true;
+}
+
 route('DELETE', '/api/testcases/:id', (ctx) => {
   const t = repo.get('test_cases', ctx.params.id);
   if (!t) throw new HttpError(404, `Test case ${ctx.params.id} not found.`);
   repo.remove('test_cases', t.id);
-  audit('tests', 'testcase.deleted', { user: ctx.user, projectId: t.projectId, detail: { id: t.id, title: t.title } });
-  return { deleted: true };
+  const scenarioRemoved = dropEmptyScenario(t.scenarioId);
+  audit('tests', 'testcase.deleted', { user: ctx.user, projectId: t.projectId, detail: { id: t.id, title: t.title, scenarioRemoved } });
+  return { deleted: true, scenarioRemoved };
 });
 
 route('POST', '/api/testcases/bulk', (ctx) => {
@@ -155,13 +165,16 @@ route('POST', '/api/testcases/bulk', (ctx) => {
   for (const k of ['priority', 'status', 'testType']) if (ctx.body[k]) patch[k] = ctx.body[k];
   validateTestCase(patch, true);
   let n = 0;
+  const scenarios = new Set();
   for (const id of ids) {
     const t = repo.get('test_cases', id);
     if (t && t.projectId === p.id) {
-      if (ctx.body.delete) repo.remove('test_cases', id); else repo.update('test_cases', id, { ...patch, updatedAt: now() });
+      if (ctx.body.delete) { scenarios.add(t.scenarioId); repo.remove('test_cases', id); }
+      else repo.update('test_cases', id, { ...patch, updatedAt: now() });
       n++;
     }
   }
+  if (ctx.body.delete) scenarios.forEach((id) => dropEmptyScenario(id));
   audit('tests', ctx.body.delete ? 'testcase.bulk-deleted' : 'testcase.bulk-updated', { user: ctx.user, projectId: p.id, detail: { count: n, patch } });
   return { updated: n };
 });
