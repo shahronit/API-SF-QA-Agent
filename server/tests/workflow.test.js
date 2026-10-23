@@ -82,6 +82,26 @@ test('workflow compute: new project is in progress until stories and tests exist
   assert.equal(workflow.getState(repo.get('projects', p.id)).currentStep, 'create');
 });
 
+test('imported test_cases complete Create without a generate proposal', () => {
+  const p = {
+    id: 'PRJ-WF-IMP', name: 'Imported suite', description: '', environment: 'QA', apiVersion: '62.0',
+    mode: 'demo', sfOrg: 'unit', jiraProjectKey: 'WF', status: 'active', createdAt: now(), updatedAt: now(),
+    integrationConfig: {},
+  };
+  repo.insert('projects', p);
+  repo.insert('test_cases', {
+    id: 'TC-WF-IMP', projectId: p.id, seq: 10, title: 'Imported ping', apiType: 'HTTP',
+    method: 'GET', endpoint: '{{baseUrl}}/ping', auth: 'default', testType: 'Functional',
+    priority: 'P2', status: 'ready', label: 'ASSUMED', tags: ['imported'],
+    createdAt: now(), updatedAt: now(),
+  });
+  const steps = workflow.compute(p);
+  assert.equal(steps.create.status, 'completed');
+  assert.equal(steps.create.detail.tests, 1);
+  assert.equal(steps.create.parts.find((x) => x.id === 'generate').status, 'completed');
+  assert.equal(steps.create.parts.find((x) => x.id === 'approve').status, 'completed');
+});
+
 test('demo Postman connector discovers local collections without MCP', async () => {
   const pm = postmanFor({
     id: 'PRJ-WF', name: 'Workflow Unit', environment: 'QA', mode: 'demo', apiVersion: '62.0',

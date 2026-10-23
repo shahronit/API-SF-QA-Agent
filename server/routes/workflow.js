@@ -187,8 +187,9 @@ route('POST', '/api/projects/:id/postman/attach', async (ctx) => {
       storyKey: b.storyKey,
     });
     workflow.touch(p.id, 'postman', 'completed', { collectionId: result.collectionId, reused: true, imported: result.imported });
+    if (result.imported || result.skipped) workflow.touch(p.id, 'execute', 'in_progress', { imported: result.imported });
     audit('postman', 'collection.attached', { user: ctx.user, projectId: p.id, detail: { uid: result.collectionId, imported: result.imported } });
-    return result;
+    return { ...result, executable: true, testsHref: '/testcases' };
   } catch (e) {
     throw new HttpError(400, (e.explanation && e.explanation.title) || e.message, e.explanation || { action: 'Select a collection from Discover or import a Collection v2.1 file.' });
   }

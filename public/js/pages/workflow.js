@@ -254,7 +254,7 @@
             <button class="btn" data-act="create">${ic('plus')} Create new collection</button>
             <a class="btn" href="/automation" data-link>Import collection file</a>
             <a class="btn" href="/projects/${p.id}?tab=connection" data-link>Postman connection</a></div>
-          <p class="small muted mt wrap">Pick a collection this project already has, or import any Postman version (v1 / v2 / v2.1) on HTTP / Postman — the platform detects the org and reuses or creates the project. Salesforce MCP/CLI is backend metadata only.</p>
+          <p class="small muted mt wrap">Pick a collection this project already has, or import any Postman version (v1 / v2 / v2.1) on HTTP / Postman. Requests become Tests immediately and can run without generate/approve. Salesforce MCP/CLI is backend metadata only.</p>
           <div data-out class="mt">${loading(4)}</div>
         </div></div>`);
       const out = pane.querySelector('[data-out]');
@@ -284,17 +284,23 @@
     },
 
     async generate(pane, p) {
-      const stories = await api.get(`/api/stories?projectId=${p.id}&pageSize=40`);
+      const [stories, tests] = await Promise.all([
+        api.get(`/api/stories?projectId=${p.id}&pageSize=40`),
+        api.get(`/api/testcases${api.qs({ projectId: p.id, pageSize: 5, sort: 'seq', dir: 'ASC' })}`),
+      ]);
       const g = (QA.state.meta && QA.state.meta.generators) || {};
-      pane.innerHTML = String(h`<div class="card"><div class="card-head"><h2>Generate API tests</h2></div>
-        <div class="card-body"><p class="small wrap">Source: Jira ticket, integration doc, or both. Engine baseline plus Cursor CLI (${g.cursorInstalled ? (g.cursorCliEnabled ? 'enabled' : 'installed, flag off') : 'not installed'}) then Gemini CLI (${g.geminiInstalled ? (g.geminiCliEnabled ? 'enabled' : 'installed, flag off') : 'not installed'}). Open a story to pick the source. You still approve before run.</p></div>
-        ${QA.ui.table({ rows: stories.items, emptyState: empty({ title: 'No stories', text: 'Sync Jira first.', action: h`<a class="btn primary" href="/workflow/jira" data-link>Open Jira requirement</a>` }), columns: [
+      const ready = tests.total || (tests.items || []).length;
+      pane.innerHTML = String(h`${ready ? h`<div class="callout ok" style="margin-bottom:16px">${ic('check')}<div class="small wrap"><b>${fmt.num(ready)} test(s) are already on this project</b> (including imported collections). They are runnable now — generate/approve is only for tickets that still have no tests. <a href="/testcases" data-link>Open Tests</a> · <button class="btn xs primary" data-act="run-ready">${ic('play')} Run tests</button></div></div>` : ''}
+        <div class="card"><div class="card-head"><h2>Generate API tests</h2></div>
+        <div class="card-body"><p class="small wrap">${ready ? 'Use generate when a Jira ticket has no tests yet.' : 'This project has no tests yet. Import a collection on HTTP / Postman, or generate from a Jira ticket (you still approve).'} Engine baseline plus Cursor CLI (${g.cursorInstalled ? (g.cursorCliEnabled ? 'enabled' : 'installed, flag off') : 'not installed'}) then Gemini CLI (${g.geminiInstalled ? (g.geminiCliEnabled ? 'enabled' : 'installed, flag off') : 'not installed'}).</p></div>
+        ${QA.ui.table({ rows: stories.items, emptyState: empty({ title: 'No stories', text: ready ? 'Tests can still run from the Tests page. Sync Jira to attach them to a ticket.' : 'Sync Jira first, or import a collection.', action: h`<a class="btn primary" href="/automation" data-link>Import collection</a><a class="btn" href="/workflow/jira" data-link>Open Jira requirement</a>` }), columns: [
           { key: 'key', label: 'Jira', render: (s) => h`<a class="mono" href="/stories/${s.key}" data-link>${s.key}</a>` },
           { key: 'summary', label: 'Summary', render: (s) => h`<div class="wrap">${s.summary}</div>` },
           { key: 'coverage', label: 'Tests', render: (s) => fmt.num(s.coverage && s.coverage.tests) },
-          { key: 'act', label: '', render: (s) => h`<button class="btn xs primary" data-gen="${s.key}">Generate</button>` },
+          { key: 'act', label: '', render: (s) => h`<a class="btn xs" href="/stories/${s.key}" data-link>Attach</a><button class="btn xs primary" data-gen="${s.key}">Generate</button>` },
         ] })}
-        <div class="card-body"><a class="btn" href="/stories" data-link>Open Stories &amp; Tests</a></div></div>`);
+        <div class="card-body"><a class="btn" href="/stories" data-link>Open Stories &amp; Tests</a><a class="btn" href="/testcases" data-link>Open Tests</a></div></div>`);
+      on(pane, 'click', '[data-act=run-ready]', () => C.runDialog());
       on(pane, 'click', '[data-gen]', (e, el) => withBusy(el, async () => {
         try {
           const r = await api.post('/api/generate', { storyKey: el.dataset.gen, projectId: p.id });
@@ -388,6 +394,10 @@
       try {
         const r = await api.post(`/api/projects/${p.id}/postman/attach`, { uid: el.dataset.uid, importTests: true });
         toast(r.notice || `Using “${r.name}” on this project.`, 'ok');
+        if (r.imported) {
+          QA.router.go(r.testsHref || '/testcases');
+          return;
+        }
         if (after) await after();
       } catch (err) { toastError(err); }
     }));

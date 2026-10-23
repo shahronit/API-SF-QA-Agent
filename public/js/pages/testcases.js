@@ -13,10 +13,11 @@
       const m = QA.state.meta;
       view.innerHTML = String(h`${C.pageHead('Tests', `API tests for ${p.name}. Tick rows to run a subset, or open a row to edit it.`,
         h`<button class="btn" data-act="new">${ic('plus')} New test</button><button class="btn primary" data-act="run">${ic('play')} Run selected</button>`)}
-        ${C.pageIntro({ what: 'Every generated or hand-written API test for this project. Filters on the toolbar narrow by priority, type and last result. Tick rows to delete one or many.', next: 'Generate from a Jira ticket, an integration doc, or both. To run: tick the rows you want (or none for the dialog defaults) and click Run selected.' })}
+        ${C.pageIntro({ what: 'Every imported, generated or hand-written API test for this project. Imported collection requests are ready to run — they do not wait for generate/approve.', next: 'If this list has tests, tick rows and Run selected. Attach selected rows to a Jira ticket from the bulk bar. Generate from Jira only when there are no tests yet.' })}
         <div class="card" style="margin-bottom:12px" data-bulk hidden><div class="card-body row wrap" style="gap:10px;padding:10px 14px">
           <b data-selcount></b><span class="spacer"></span>
           <button class="btn sm primary" data-bulk-act="run">${ic('play')} Run selected</button>
+          <button class="btn sm" data-bulk-act="link">${ic('jira')} Attach to ticket</button>
           <select class="select" data-bulk-act="priority" aria-label="Set priority" style="height:28px"><option value="">Set priority…</option>${m.priorities.map((x) => h`<option>${x}</option>`)}</select>
           <select class="select" data-bulk-act="status" aria-label="Set status" style="height:28px"><option value="">Set status…</option>${['ready', 'draft', 'disabled'].map((x) => h`<option>${x}</option>`)}</select>
           <button class="btn sm danger-outline" data-bulk-act="delete">${ic('trash')} Delete</button></div></div>
@@ -27,6 +28,7 @@
         sort: 'seq', dir: 'ASC', selectable: true, q: f.q || '', searchPlaceholder: 'Search id, title, endpoint or story',
         filters: { tag: f.tag || '', priority: f.priority || '', testType: f.testType || '', lastResult: f.lastResult || '', apiType: f.apiType || '', status: f.status || '', label: f.label || '', storyKey: f.storyKey || '', scenarioId: f.scenarioId || '' },
         toolbar: (s) => h`${C.chipGroup('priority', m.priorities, (s.filters.priority || '').split(','))}
+          ${C.chipGroup('tag', [{ value: 'imported', label: 'Imported' }], (s.filters.tag || '').split(','))}
           <select class="select" data-filter="testType" aria-label="Test type"><option value="">All types</option>${m.testTypes.map((x) => h`<option ${s.filters.testType === x ? 'selected' : ''}>${x}</option>`)}</select>
           <select class="select" data-filter="lastResult" aria-label="Last result"><option value="">Any result</option>${['passed', 'failed', 'blocked', 'skipped'].map((x) => h`<option ${s.filters.lastResult === x ? 'selected' : ''}>${x}</option>`)}</select>
           <select class="select" data-filter="label" aria-label="Provenance"><option value="">Any provenance</option>${['VERIFIED', 'ASSUMED', 'RECOMMENDED'].map((x) => h`<option ${s.filters.label === x ? 'selected' : ''}>${x}</option>`)}</select>
@@ -36,11 +38,11 @@
         rowAttrs: (r) => `data-id="${esc(r.id)}"`,
         onRow: (r) => openEditor(r.id, list),
         onSelect: (s) => { const b = view.querySelector('[data-bulk]'); b.hidden = !s.selected.size; view.querySelector('[data-selcount]').textContent = `${s.selected.size} selected`; },
-        emptyState: (s) => (s.q || Object.values(s.filters).some(Boolean) ? empty({ title: 'No test cases match', text: 'Clear the search or filters.' }) : empty({ icon: 'wand', title: 'No test cases yet', text: 'Generate tests from a Jira story or create one manually.', action: h`<a class="btn primary" href="/stories" data-link>${ic('jira')} Generate from a story</a>` })),
+        emptyState: (s) => (s.q || Object.values(s.filters).some(Boolean) ? empty({ title: 'No test cases match', text: 'Clear the search or filters. Imported collection tests are listed here without approve.' }) : empty({ icon: 'wand', title: 'No test cases yet', text: 'Import a Postman collection to run tests immediately, or generate from a Jira ticket (that path still needs review and approve).', action: h`<a class="btn primary" href="/automation" data-link>${ic('upload')} Import collection</a><a class="btn" href="/stories" data-link>${ic('jira')} Generate from a story</a>` })),
         columns: [
           { key: 'id', label: 'Id', sortable: true, render: (r) => h`<span class="mono small">${r.id}</span>` },
           { key: 'title', label: 'Test case', sortable: true, render: (r) => h`<div class="cell-title">${r.title}</div><div class="cell-sub">${C.endpoint(r.method, r.endpoint)}</div>` },
-          { key: 'storyKey', label: 'Story', sortable: true, render: (r) => (r.storyKey ? h`<a href="/stories/${r.storyKey}" data-link class="small">${r.storyKey}</a>` : '–') },
+          { key: 'storyKey', label: 'Story', sortable: true, render: (r) => h`${r.storyKey ? h`<a href="/stories/${r.storyKey}" data-link class="small">${r.storyKey}</a>` : '–'}${(r.tags || []).includes('imported') ? h` <span class="tag">imported</span>` : ''}` },
           { key: 'testType', label: 'Type', sortable: true, render: (r) => h`<span class="small">${r.testType}</span>` },
           { key: 'priority', label: 'Pri', sortable: true, render: (r) => pri(r.priority) },
           { key: 'label', label: 'Provenance', render: (r) => prov(r.label) },
@@ -57,6 +59,7 @@
         if (!value) return;
         try { const r = await api.post(`/api/testcases/bulk?projectId=${p.id}`, { ids: [...list.state.selected], [field]: value }); toast(`${r.updated} test cases updated.`, 'ok'); list.reload(); } catch (err) { toastError(err); }
       });
+      on(view, 'click', '[data-bulk-act=link]', () => linkSelected(list, p));
       on(view, 'click', '[data-bulk-act=delete]', async () => {
         const n = list.state.selected.size;
         const ok = await confirm({ title: `Delete ${n} test cases?`, message: 'Execution history is kept, but the test cases are removed from future runs.', confirmLabel: 'Delete', danger: true });
@@ -68,7 +71,37 @@
     },
   };
 
+  const { modal } = QA.ui;
   const J = (v) => (v === undefined || v === null ? '' : JSON.stringify(v, null, 2));
+  function linkSelected(list, p) {
+    const ids = [...list.state.selected];
+    if (!ids.length) { toast('Select at least one test case.', 'warn'); return; }
+    modal({
+      title: 'Attach tests to a Jira ticket',
+      subtitle: `${ids.length} selected test(s). They stay runnable; this only stores the story key.`,
+      body: h`<label class="field"><span>Jira ticket</span>
+        <input class="input mono" name="storyKey" list="link-story-keys" placeholder="${p.jiraProjectKey || 'PROJ'}-123" autocomplete="off">
+        <datalist id="link-story-keys"></datalist>
+        <small>The ticket must already be on this project. Leave empty and save to unlink.</small></label>`,
+      foot: h`<button class="btn" data-close>Cancel</button><button class="btn primary" data-go>Attach</button>`,
+      onMount(el, close) {
+        api.get(`/api/stories${api.qs({ projectId: p.id, pageSize: 100 })}`).then((r) => {
+          const dl = el.querySelector('#link-story-keys');
+          if (!dl) return;
+          dl.innerHTML = String(h`${(r.items || []).map((s) => h`<option value="${s.key}">${s.summary || s.key}</option>`)}`);
+        }).catch(() => {});
+        el.querySelector('[data-go]').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          const storyKey = (el.querySelector('[name=storyKey]').value || '').trim().toUpperCase();
+          try {
+            const r = await api.post(`/api/testcases/bulk?projectId=${p.id}`, { ids, storyKey: storyKey || null });
+            close();
+            toast(storyKey ? `Attached ${r.updated} test(s) to ${storyKey}.` : `Unlinked ${r.updated} test(s).`, 'ok');
+            list.reload();
+          } catch (err) { toastError(err, 'Not attached'); }
+        }));
+      },
+    });
+  }
   function importedExtra(ex) {
     if (!ex || typeof ex !== 'object') return '';
     const bits = [
@@ -130,7 +163,7 @@
       <div data-p="request" class="hidden"><div class="form-grid">
         <label class="field"><span>Method</span><select class="select" name="method">${['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'HEAD'].map((x) => h`<option ${t.method === x ? 'selected' : ''}>${x}</option>`)}</select></label>
         <label class="field"><span>API type</span><select class="select" name="apiType">${m.apiTypes.map((x) => h`<option ${t.apiType === x ? 'selected' : ''}>${x}</option>`)}</select></label>
-        <label class="field full"><span>Endpoint</span><input class="input mono" name="endpoint" value="${t.endpoint || ''}" required><small>Use variables such as <code>{{apiVersion}}</code>, <code>{{accountId}}</code>, <code>{{$uuid}}</code>. Never paste tokens.</small></label>
+        <label class="field full"><span>Endpoint</span><input class="input mono" name="endpoint" value="${t.endpoint || ''}" required><small>Path starting with <code>/</code>, an http(s) URL, or a template such as <code>{{baseUrl}}/v1/orders</code>. Never paste tokens.</small></label>
         <label class="field"><span>Authentication</span><select class="select" name="auth">${[['default', 'Project integration user'], ['lowpriv', 'Low-privilege user'], ['none', 'No token (negative)'], ['invalid', 'Invalid token (negative)']].map(([v, l]) => h`<option value="${v}" ${t.auth === v ? 'selected' : ''}>${l}</option>`)}</select></label>
         <label class="field"><span>Timeout (ms)</span><input class="input" type="number" min="100" name="timeoutMs" value="${t.timeoutMs || ''}" placeholder="30000"></label>
         <label class="field"><span>Headers (JSON)</span><textarea class="input mono" rows="5" name="headers" spellcheck="false">${J(t.headers || {})}</textarea><small>Authorization is injected from the secret store and is rejected here.</small></label>
@@ -139,6 +172,7 @@
         ${t.bodyRaw ? h`<label class="field full"><span>Raw body (XML/CSV)</span><textarea class="input mono" rows="8" name="bodyRaw" spellcheck="false">${t.bodyRaw}</textarea></label>` : ''}
         <label class="field full"><span>Extract variables (JSON)</span><textarea class="input mono" rows="3" name="extract" spellcheck="false">${J(t.extract || [])}</textarea><small>e.g. <code>[{"var":"accountId","path":"$.id"}]</code></small></label>
         ${t.extra ? importedExtra(t.extra) : ''}
+        <label class="field full"><span>Extra (JSON)</span><textarea class="input mono" rows="8" name="extra" spellcheck="false">${t.extra ? J(t.extra) : ''}</textarea><small>Imported form data, GraphQL, scripts, auth and examples. Saving updates the case used at run time.</small></label>
       </div></div>
       <div data-p="assertions" class="hidden"><label class="field"><span>Assertions (JSON array)</span><textarea class="input mono" rows="18" name="assertions" spellcheck="false">${J(t.assertions || [])}</textarea>
         <small>Types: status, jsonpath, header, responseTime, sfError, schema, bodyContains. Operators: eq, neq, in, exists, notExists, contains, notContains, matches, type, lt, lte, gt, gte.</small></label></div>
@@ -166,6 +200,7 @@
         headers: parseJson(v('headers'), 'Headers', {}), query: parseJson(v('query'), 'Query parameters', {}), body: parseJson(v('body'), 'Body', null),
         extract: parseJson(v('extract'), 'Extract variables', []), assertions: parseJson(v('assertions'), 'Assertions', []),
         sfValidation: parseJson(v('sfValidation'), 'Salesforce validation', null), cleanup: parseJson(v('cleanup'), 'Cleanup', null),
+        extra: parseJson(v('extra'), 'Extra', t.extra || null),
       };
       if (form.elements.bodyRaw) b.bodyRaw = v('bodyRaw');
       if (v('priority')) b.priority = v('priority');

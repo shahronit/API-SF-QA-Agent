@@ -18,7 +18,7 @@
     QA.router.setCrumbs([{ label: 'Test Runs' }]);
     view.innerHTML = String(h`${C.pageHead('Test runs', `Each run is one execution of tests against ${p.name}. Open a row for results, Salesforce checks and defects.`,
       h`<button class="btn" data-act="failed">${ic('zap')} Re-run failed</button><button class="btn primary" data-act="run">${ic('play')} Start a run</button>`)}
-      ${C.pageIntro({ what: 'History of every suite run for this project. Running ones update live.', next: 'Click Start a run to execute approved tests. After a run finishes, open it to see failures and raise defects.' })}
+      ${C.pageIntro({ what: 'History of every suite run for this project. Running ones update live.', next: 'Click Start a run to execute ready tests (imported collections or approved Jira suites). After a run finishes, open it to see failures and raise defects.' })}
       ${C.connectionNotice(p)}<div data-list></div>`);
     const list = C.listController(view.querySelector('[data-list]'), {
       sort: 'startedAt', dir: 'DESC', searchPlaceholder: 'Search by execution id, label or user',
@@ -27,7 +27,7 @@
       fetch: (q) => api.get(`/api/runs${api.qs({ projectId: p.id, ...q })}`),
       rowAttrs: (r) => `data-id="${esc(r.id)}"`,
       onRow: (r) => QA.router.go(`/execution/${r.id}`),
-      emptyState: () => empty({ icon: 'play', title: 'No executions yet', text: 'Start a run to execute the approved test cases against the selected environment.', action: h`<button class="btn primary" data-act="run">${ic('play')} Run tests</button>` }),
+      emptyState: () => empty({ icon: 'play', title: 'No executions yet', text: 'Start a run to execute imported or approved tests against the selected environment. If this project has no tests yet, import a collection or generate from a Jira ticket.', action: h`<button class="btn primary" data-act="run">${ic('play')} Run tests</button><a class="btn" href="/testcases" data-link>Open Tests</a>` }),
       columns: [
         { key: 'id', label: 'Execution', sortable: false, render: (r) => h`<span class="mono small">${r.id}</span><div class="cell-sub">${r.label || r.trigger || 'manual'}</div>` },
         { key: 'status', label: 'Status', sortable: true, render: (r) => badge(r.status) },

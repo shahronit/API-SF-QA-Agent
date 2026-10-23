@@ -388,3 +388,42 @@ test('imported extra is persisted on test_cases and encoded by the runner', () =
   assert.equal(parsed.variables.n, '1');
   assert.match(gqlEnc.contentType, /json/);
 });
+
+test('importDrafts writes ready tagged test_cases that list without a proposal', () => {
+  const p = {
+    id: 'PRJ-IMP', name: 'Import ready', environment: 'QA', apiVersion: '62.0',
+    mode: 'demo', status: 'active', createdAt: now(), updatedAt: now(), integrationConfig: {},
+  };
+  repo.insert('projects', p);
+  const r = postmanFor(p).importDrafts({
+    info: { name: 'Shop', schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
+    item: [{ name: 'Ping', request: { method: 'GET', url: '{{baseUrl}}/v1/ping' } }],
+  });
+  assert.equal(r.imported, 1);
+  const tc = repo.get('test_cases', r.ids[0]);
+  assert.equal(tc.status, 'ready');
+  assert.ok(tc.tags.includes('imported'));
+  assert.equal(tc.storyKey, null);
+  const listed = repo.find('test_cases', 'projectId = $p', { p: p.id });
+  assert.equal(listed.length, 1);
+  const proposals = repo.find('proposals', 'projectId = $p', { p: p.id });
+  assert.equal(proposals.length, 0);
+});
+
+test('imported tests can be linked to a storyKey and unlinked', () => {
+  const { applyStoryKey } = require('../routes/tests');
+  const p = repo.get('projects', 'PRJ-IMP');
+  const tests = repo.find('test_cases', 'projectId = $p', { p: p.id });
+  assert.ok(tests.length);
+  repo.insert('stories', {
+    id: 'ST-IMP', projectId: p.id, key: 'IMP-101', summary: 'Imported ping',
+    description: '', acceptanceCriteria: '', issueType: 'Story', status: 'To Do',
+    components: [], labels: [], source: 'manual', syncedAt: now(),
+  });
+  const linked = applyStoryKey(p, [tests[0].id], 'IMP-101', 'qa');
+  assert.equal(linked.updated, 1);
+  assert.equal(repo.get('test_cases', tests[0].id).storyKey, 'IMP-101');
+  const undone = applyStoryKey(p, [tests[0].id], null, 'qa');
+  assert.equal(undone.storyKey, null);
+  assert.equal(repo.get('test_cases', tests[0].id).storyKey, null);
+});

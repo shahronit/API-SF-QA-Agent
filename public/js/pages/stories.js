@@ -34,7 +34,7 @@
     const jira = p.connection && p.connection.jira;
     view.innerHTML = String(h`${C.pageHead('Jira tickets', h`${jira ? `Tickets from ${p.jiraProjectKey}.` : 'Jira is not connected yet.'} Open a ticket to generate API tests for that ticket only.`,
       h`<button class="btn" data-act="add">${ic('plus')} Add ticket</button><button class="btn" data-act="sync">${ic('zap')} Pull from Jira</button><button class="btn" data-act="gen-all">${ic('wand')} Generate all tickets</button><button class="btn primary" data-act="gen-jira">${ic('wand')} Generate tests</button>`)}
-      ${C.pageIntro({ what: 'These are the Jira stories for this project. Generate API tests from the ticket you have open, an integration document, or both. Uses Cursor CLI / Gemini CLI if you are logged in. You still review and approve.', next: jira ? 'Open a ticket and click Generate API tests, or use Generate tests and enter that ticket key. Generate all tickets is a separate action. You review and approve before anything runs.' : 'Add a Jira site on the project Connections tab, or add a ticket by hand to try the flow in Demo.' })}
+      ${C.pageIntro({ what: 'These are the Jira stories for this project. If tests were imported from a collection, open a ticket and attach them — they are already runnable. Generate API tests only when a ticket has no tests yet; that path still needs review and approve.', next: jira ? 'Open a ticket to attach imported tests or generate a new suite. You review and approve generated suites before they become tests.' : 'Add a Jira site on the project Connections tab, or add a ticket by hand to try the flow in Demo.' })}
       <div data-list></div>`);
     let sprints = [];
     const list = C.listController(view.querySelector('[data-list]'), {
@@ -203,6 +203,43 @@
     });
   }
 
+  function attachTestsDialog(story, after) {
+    const p = QA.state.project;
+    modal({
+      title: `Attach tests to ${story.key}`,
+      subtitle: 'Pick imported or unlinked tests. They stay executable; this only stores the ticket key.',
+      size: 'wide',
+      body: h`<div data-attach>${loading(6)}</div>`,
+      foot: h`<button class="btn" data-close>Cancel</button><button class="btn primary" data-go>${ic('check')} Attach selected</button>`,
+      onMount(el, close) {
+        const box = el.querySelector('[data-attach]');
+        api.get(`/api/testcases${api.qs({ projectId: p.id, unlinked: 'true', pageSize: 200, sort: 'seq', dir: 'ASC' })}`).then((r) => {
+          const rows = r.items || [];
+          if (!rows.length) {
+            box.innerHTML = String(empty({ icon: 'upload', title: 'No unlinked tests', text: 'Import a Postman collection first, or unlink a test from its current ticket.', action: h`<a class="btn" href="/automation" data-link data-close>${ic('upload')} Import collection</a>` }));
+            return;
+          }
+          box.innerHTML = String(h`<p class="small muted">${rows.length} test(s) with no ticket yet. Tick the ones that belong to ${story.key}.</p>
+            ${QA.ui.table({ rows, selectable: true, rowAttrs: (t) => `data-id="${esc(t.id)}"`, columns: [
+              { key: 'id', label: 'Id', render: (t) => h`<span class="mono small">${t.id}</span>` },
+              { key: 'title', label: 'Test', render: (t) => h`<div class="cell-title">${t.title}${(t.tags || []).includes('imported') ? h` <span class="tag">imported</span>` : ''}</div><div class="cell-sub">${C.endpoint(t.method, t.endpoint)}</div>` },
+              { key: 'testType', label: 'Type' },
+            ] })}`);
+        }).catch((err) => { box.innerHTML = String(errorBox(err)); });
+        el.querySelector('[data-go]').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          const ids = [...el.querySelectorAll('[data-select]:checked')].map((x) => x.dataset.select);
+          if (!ids.length) { toast('Select at least one test case.', 'warn'); return; }
+          try {
+            const r = await api.post(`/api/stories/${encodeURIComponent(story.key)}/link-tests?projectId=${p.id}`, { ids });
+            close();
+            toast(`Attached ${r.linked || r.updated} test(s) to ${story.key}.`, 'ok');
+            if (after) after();
+          } catch (err) { toastError(err, 'Not attached'); }
+        }));
+      },
+    });
+  }
+
   async function generate(storyKey, btn, extra = {}) {
     const p = QA.state.project;
     return withBusy(btn, async () => {
@@ -271,8 +308,8 @@
     let tab = 'tests';
     const ac = String(s.acceptanceCriteria || '').split('\n').map((x) => x.replace(/^\s*[-*•]\s*/, '').trim()).filter(Boolean);
     view.innerHTML = String(h`${C.pageHead(h`<span class="mono" style="font-size:20px">${s.key}</span> ${s.summary}`, h`${s.issueType || 'Story'} · ${s.status} · ${s.priority || 'No priority'} · ${s.sprint || 'No sprint'}${s.assignee ? ` · ${s.assignee}` : ''} · synced ${fmt.ago(s.syncedAt)}`,
-        h`${s.url ? h`<a class="btn" href="${s.url}" target="_blank" rel="noopener">${ic('external')} Open in Jira</a>` : ''}<button class="btn" data-act="impact">${ic('target')} Regression impact</button><button class="btn" data-act="run" ${cov.tests ? '' : 'disabled'}>${ic('play')} Run story tests</button><button class="btn danger-outline" data-act="del-all" ${cov.tests ? '' : 'disabled'}>${ic('trash')} Delete all generated</button><button class="btn primary" data-act="gen">${ic('wand')} Generate API tests for ${s.key}</button>`)}
-      <p class="small muted" style="margin:0 0 12px">Pick Jira ticket, integration doc, or both. Cursor CLI / Gemini CLI overlay extra scenarios if you are logged in. You still review and approve.</p>
+        h`${s.url ? h`<a class="btn" href="${s.url}" target="_blank" rel="noopener">${ic('external')} Open in Jira</a>` : ''}<button class="btn" data-act="impact">${ic('target')} Regression impact</button><button class="btn" data-act="attach">${ic('plus')} Attach tests</button><button class="btn" data-act="run" ${cov.tests ? '' : 'disabled'}>${ic('play')} Run story tests</button><button class="btn danger-outline" data-act="del-all" ${cov.tests ? '' : 'disabled'}>${ic('trash')} Delete all generated</button><button class="btn primary" data-act="gen">${ic('wand')} Generate API tests for ${s.key}</button>`)}
+      <p class="small muted" style="margin:0 0 12px">Imported collection tests can be attached here and edited. Generate from Jira / docs only if this ticket has no tests yet — you still review and approve generated suites.</p>
       <div class="card" style="margin-bottom:12px"><div class="card-body">${sourcePicker('jira+docs')}</div></div>
       <div class="grid g-21">
         <div class="card"><div class="card-head"><h2>Requirement</h2></div><div class="card-body">
@@ -292,9 +329,9 @@
     const pane = view.querySelector('[data-pane]');
     const drawPane = () => {
       if (tab === 'tests') pane.innerHTML = String(h`${s.tests.length ? h`<div class="row wrap" style="gap:8px;margin-bottom:8px"><button class="btn xs danger-outline" data-act="del-sel">${ic('trash')} Delete selected</button><span class="small muted">Tick rows to delete one or more tests.</span></div>` : ''}
-        ${QA.ui.table({ rows: s.tests, selectable: true, rowAttrs: (r) => `data-tc="${esc(r.id)}"`, emptyState: empty({ icon: 'wand', title: 'No test cases for this story', text: 'Generate API tests to propose scenarios for review.' }), columns: [
+        ${QA.ui.table({ rows: s.tests, selectable: true, rowAttrs: (r) => `data-tc="${esc(r.id)}"`, emptyState: empty({ icon: 'wand', title: 'No test cases for this story', text: 'Attach tests imported from a Postman collection, or generate a suite to review and approve.', action: h`<button class="btn primary" data-act="attach">${ic('plus')} Attach tests</button>` }), columns: [
         { key: 'id', label: 'Id', render: (r) => h`<span class="mono small">${r.id}</span>` },
-        { key: 'title', label: 'Test case', render: (r) => h`<div class="cell-title">${r.title}</div><div class="cell-sub">${C.endpoint(r.method, r.endpoint)}</div>` },
+        { key: 'title', label: 'Test case', render: (r) => h`<div class="cell-title">${r.title}${(r.tags || []).includes('imported') ? h` <span class="tag">imported</span>` : ''}</div><div class="cell-sub">${C.endpoint(r.method, r.endpoint)}</div>` },
         { key: 'testType', label: 'Type' }, { key: 'priority', label: 'Pri', render: (r) => pri(r.priority) },
         { key: 'label', label: 'Provenance', render: (r) => prov(r.label) },
         { key: 'lastResult', label: 'Last result', render: (r) => (r.lastResult ? badge(r.lastResult) : h`<span class="faint small">Not run</span>`) },
@@ -349,6 +386,7 @@
       if (!ok) return;
       try { await api.post(`/api/testcases/bulk?projectId=${p.id}`, { ids, delete: true }); toast(`${ids.length} test case(s) deleted.`, 'warn'); QA.router.render(); } catch (err) { toastError(err); }
     });
+    on(view, 'click', '[data-act=attach]', () => attachTestsDialog(s, () => QA.router.render()));
     on(view, 'click', '[data-act=run]', () => C.runDialog({ preset: { storyKey: [s.key], label: `${s.key} story tests` }, title: `Run tests for ${s.key}` }));
     on(view, 'click', '[data-act=impact]', () => QA.router.go(`/regression?story=${s.key}`));
     (async () => {

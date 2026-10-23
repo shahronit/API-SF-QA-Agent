@@ -140,13 +140,9 @@
         const r = await api.post('/api/postman/import', { collection, auto: true });
         await QA.state.reloadProjects();
         if (r.project && r.project.id) QA.state.setProject(r.project.id);
-        if (r.href) {
-          toast(r.notice || 'Imported. Set the frontend HTTP base URL and token to run these tests.', 'warn', 'HTTP details needed');
-          QA.router.go(r.href);
-        } else {
-          toast(r.notice || 'Collection imported.', 'ok', r.created ? 'Project created' : 'Collection imported');
-          QA.router.go('/testcases?tag=imported');
-        }
+        toast(r.notice || 'Collection imported as runnable tests.', 'ok', r.created ? 'Project created' : 'Collection imported');
+        if (r.setupHref) toast('Set the HTTP base URL and token on Connections if these frontend tests need them.', 'warn', 'HTTP details');
+        QA.router.go(r.testsHref || '/testcases');
       } catch (err) { toastError(err, 'Import failed'); }
       el.value = '';
     }));
@@ -983,6 +979,10 @@
         const r = await api.post(`/api/projects/${p.id}/postman/attach`, { uid: el.dataset.uid, importTests: true });
         toast(r.notice || `Using “${r.name}” on this project.`, r.missingHttp ? 'warn' : 'ok', r.missingHttp ? 'HTTP details needed' : 'Collection attached');
         await reloadConn();
+        if (r.imported) {
+          QA.router.go(r.testsHref || '/testcases');
+          return;
+        }
         if (r.missingHttp) {
           connUi.pm = 'connect';
           draw();

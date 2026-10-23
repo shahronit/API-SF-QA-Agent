@@ -20,7 +20,7 @@
 
       view.innerHTML = String(h`${C.pageHead('Dashboard', f.scope === 'project' && S.project ? `Health of ${S.project.name} (${S.project.environment}) — pass rate, failures and recent runs.` : 'Health across every project. Switch to a project in the top bar to focus.',
         h`<a class="btn" href="/projects/new" data-link>${ic('plus')} New project</a><button class="btn" data-act="refresh">${ic('refresh')} Refresh</button>${S.project ? h`<button class="btn primary" data-act="run">${ic('play')} Run tests</button>` : ''}`)}
-        ${C.pageIntro({ what: 'A snapshot of quality for the project in the top bar. KPIs, the latest run and open defects live here.', next: S.project ? 'If this is a new workspace, open How QA works in the sidebar. To run tests already approved, click Run tests.' : 'Create a project first — that unlocks tickets, tests and runs.' })}
+        ${C.pageIntro({ what: 'A snapshot of quality for the project in the top bar. KPIs, the latest run and open defects live here.', next: S.project ? 'If tests were imported from a collection, click Run tests. Generate from Jira only when the project has no tests yet.' : 'Create a project first — that unlocks tickets, tests and runs.' })}
         <div class="card" style="margin-bottom:16px"><div class="toolbar" data-filters></div></div>
         <div data-body>${loading(10)}</div>`);
 
@@ -74,8 +74,8 @@
     const run = d.recentRuns[0];
     const tone = (v, good, warn) => (v === null ? '' : v >= good ? 'ok' : v >= warn ? 'warn' : 'bad');
     if (!k.results && !d.recentRuns.length) {
-      return h`<div class="card">${empty({ icon: 'play', title: 'Nothing has run yet', text: 'Create a project (or pick one), pull Jira tickets, generate tests, then run them. How QA works walks through each step.',
-        action: h`<div class="workflow-guide"><a class="btn primary" href="/projects/new" data-link>${ic('plus')} New project</a><a class="btn" href="/workflow" data-link>${ic('layers')} How QA works</a><a class="btn" href="/stories" data-link>${ic('bookmark')} Jira tickets</a></div>` })}</div>`;
+      return h`<div class="card">${empty({ icon: 'play', title: 'Nothing has run yet', text: 'Import a Postman collection to get runnable tests immediately, or generate from a Jira ticket if the project is empty. How QA works walks through each step.',
+        action: h`<div class="workflow-guide"><a class="btn primary" href="/testcases" data-link>${ic('list')} Open Tests</a><a class="btn" href="/automation" data-link>${ic('upload')} Import collection</a><a class="btn" href="/stories" data-link>${ic('bookmark')} Jira tickets</a></div>` })}</div>`;
     }
     return h`
       <div class="kpis" style="--cols:8">

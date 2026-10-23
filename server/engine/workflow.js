@@ -24,8 +24,8 @@ const STEPS = [
   },
   {
     id: 'create', label: 'Create tests',
-    help: 'Generate API tests from a Jira ticket, review coverage, and approve what should run.',
-    primary: 'Generate, review and approve tests', next: 'run',
+    help: 'Imported collections become runnable tests immediately. Generate from a Jira ticket only when the project has no tests yet — those suites still need review and approve.',
+    primary: 'Run imported tests, or generate from Jira if none exist', next: 'run',
     parts: [
       { id: 'generate', label: 'Generate' },
       { id: 'review', label: 'Review' },
@@ -126,12 +126,12 @@ function computeInner(project) {
       detail: { collections, pendingChanges: colPending, linked: project.postmanCollection || null },
     },
     generate: {
-      status: proposals ? 'completed' : (stories ? 'in_progress' : 'not_started'),
-      detail: { proposals, stories },
+      status: tests ? 'completed' : (proposals ? 'completed' : (stories ? 'in_progress' : 'not_started')),
+      detail: { proposals, stories, tests },
     },
     review: {
-      status: pending ? 'requires_approval' : (proposals ? 'completed' : 'not_started'),
-      detail: { pending },
+      status: pending ? 'requires_approval' : (tests || proposals ? 'completed' : 'not_started'),
+      detail: { pending, tests },
     },
     approve: {
       status: tests ? 'completed' : (pending ? 'requires_approval' : 'not_started'),

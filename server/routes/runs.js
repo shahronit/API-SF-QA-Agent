@@ -70,7 +70,17 @@ route('POST', '/api/runs', (ctx) => {
   } else {
     tests = selectTests(p, b);
   }
-  if (!tests.length) throw new HttpError(400, 'No executable test cases match this selection.', { cause: 'The filter matched nothing, or all matches are drafts/disabled.', action: 'Adjust the filters or generate tests from a Jira story.' });
+  if (!tests.length) {
+    const ready = repo.count('test_cases', "projectId = $p AND status != 'draft' AND status != 'disabled'", { p: p.id });
+    throw new HttpError(400, 'No executable test cases match this selection.', {
+      cause: ready
+        ? 'The filter matched nothing, or all matches are drafts/disabled.'
+        : 'This project has no ready tests yet.',
+      action: ready
+        ? 'Clear the story/priority filters, or pick tests on the Tests page and Run selected.'
+        : 'Import a Postman collection to get runnable tests immediately, or generate from a Jira ticket (that path still needs approve).',
+    });
+  }
   if (b.resolveDependencies !== false) tests = withDependencies(p, tests);
   if (tests.length > 2000) throw new HttpError(400, `Selection contains ${tests.length} tests; the per-run maximum is 2000.`, { action: 'Split the run by story, priority or test type.' });
 

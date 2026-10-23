@@ -252,6 +252,41 @@ test('import and attach reuse an existing Postman collection on the project', as
   assert.equal(imp.body.imported, 0);
 });
 
+test('imported collection tests are listed without approve and can be attached to a ticket', async () => {
+  const title = `Import-exec-${process.pid}`;
+  const col = {
+    info: { name: `Import exec ${title}`, schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
+    item: [{ name: title, request: { method: 'GET', url: 'https://api.shop.example/v1/import-exec', header: [] } }],
+  };
+  const imp = await api('POST', '/api/postman/import?projectId=PRJ-001', { collection: col, useCurrent: true, importTests: true });
+  assert.equal(imp.status, 200, imp.text.slice(0, 400));
+  assert.ok(imp.body.imported >= 1, imp.text.slice(0, 400));
+  assert.equal(imp.body.executable, true);
+  assert.equal(imp.body.testsHref, '/testcases');
+  const listed = await api('GET', `/api/testcases?projectId=PRJ-001&tag=imported&q=${encodeURIComponent(title)}`);
+  assert.equal(listed.status, 200, listed.text.slice(0, 300));
+  const tc = (listed.body.items || []).find((t) => t.title === title);
+  assert.ok(tc, 'imported test must appear on Tests without a proposal');
+  assert.equal(tc.status, 'ready');
+  assert.ok((tc.tags || []).includes('imported'));
+
+  const stories = (await api('GET', '/api/stories?projectId=PRJ-001')).body.items;
+  const story = stories.find((s) => s.key === 'DEMO-103') || stories[0];
+  const linked = await api('POST', `/api/stories/${story.key}/link-tests?projectId=PRJ-001`, { ids: [tc.id] });
+  assert.equal(linked.status, 200, linked.text.slice(0, 400));
+  assert.equal(linked.body.storyKey, story.key);
+  assert.ok(linked.body.linked >= 1);
+
+  const detail = await api('GET', `/api/stories/${story.key}?projectId=PRJ-001`);
+  assert.ok((detail.body.tests || []).some((t) => t.id === tc.id));
+
+  const saved = await api('PUT', `/api/testcases/${tc.id}`, { title: `${title} edited`, endpoint: '{{baseUrl}}/v1/import-exec' });
+  assert.equal(saved.status, 200, saved.text.slice(0, 400));
+  assert.equal(saved.body.title, `${title} edited`);
+  assert.equal(saved.body.endpoint, '{{baseUrl}}/v1/import-exec');
+  assert.equal(saved.body.storyKey, story.key);
+});
+
 test('custom endpoints can be saved, discovered, imported, linked to a story, and skip Experience/SFCC paths', async () => {
   const list = await api('GET', '/api/projects/PRJ-001/endpoints');
   assert.equal(list.status, 200, list.text.slice(0, 200));

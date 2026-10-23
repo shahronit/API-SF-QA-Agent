@@ -228,15 +228,22 @@ route('POST', '/api/postman/import', async (ctx) => {
     });
   }
   audit('automation', 'postman.imported', { user: ctx.user, projectId: p.id, detail: { count: attached.imported, collection: normalized.info && normalized.info.name, collectionId: attached.collectionId, created, envApplied: Boolean(envApply) } });
+  const workflow = require('../engine/workflow');
+  workflow.touch(p.id, 'postman', 'completed', { imported: attached.imported, collectionId: attached.collectionId });
+  if (attached.imported || attached.skipped) workflow.touch(p.id, 'execute', 'in_progress', { imported: attached.imported });
   const view = projectView(repo.get('projects', p.id));
   const { httpCredentials } = require('../config');
   const httpCreds = httpCredentials(((p.integrationConfig || {}).http || {}).credentialRef || p.credentialRef);
   const missingToken = Boolean(hints.needsBearer || attached.needsBearer) && !(httpCreds && httpCreds.token);
   const setupHref = (attached.missingHttp || missingToken) ? `/projects/${p.id}?tab=connection&focus=http` : null;
+  const testsHref = '/testcases';
   return {
     imported: attached.imported,
     skipped: attached.skipped,
     ids: attached.testIds,
+    executable: true,
+    testsHref,
+    setupHref,
     collectionId: attached.collectionId,
     reuseExisting: true,
     created,
@@ -246,7 +253,7 @@ route('POST', '/api/postman/import', async (ctx) => {
     needsBearer: Boolean(attached.needsBearer || hints.needsBearer),
     missingHttp: Boolean(attached.missingHttp),
     missingToken,
-    href: setupHref,
+    href: testsHref,
     hints: {
       name: hints.name, environment: hints.environment, apiVersion: hints.apiVersion,
       instanceUrl: hints.instanceUrl, httpBaseUrl: hints.httpBaseUrl, sfOrg: hints.sfOrg,
@@ -261,8 +268,9 @@ route('POST', '/api/postman/import', async (ctx) => {
     } : null,
     notice: [
       created
-        ? `Created project “${view.name}” from the collection and imported ${attached.imported} request(s).`
+        ? `Created project “${view.name}” from the collection and imported ${attached.imported} request(s) as runnable tests.`
         : `Using existing project “${view.name}”. ${attached.notice}`,
+      attached.imported ? 'Open Tests to run them — imported cases do not need generate/approve.' : '',
       envApply && envApply.applied.length ? `Environment: ${envApply.applied.join('; ')}.` : '',
     ].filter(Boolean).join(' '),
   };

@@ -9,6 +9,7 @@ const { classifyStory } = require('../engine/classifier');
 const { checkOperation, isProduction, PRODUCTION_WARNING } = require('../engine/safety');
 const runner = require('../engine/runner');
 const { projectFrom, getProject, paginate, likeFilter, inFilter } = require('./util');
+const { applyStoryKey, hasTag } = require('./tests');
 
 function upsertStory(projectId, s, source) {
   const existing = repo.one('stories', 'projectId = $p AND key = $k', { p: projectId, k: s.key });
@@ -95,7 +96,14 @@ route('GET', '/api/stories/:key', async (ctx) => {
     }
   }
   const scenarios = repo.find('scenarios', 'projectId = $p AND storyKey = $k', { p: p.id, k: s.key }, 'ORDER BY createdAt');
-  const tests = all('SELECT id, scenarioId, title, method, endpoint, testType, priority, status, label, lastResult, lastRunAt FROM test_cases WHERE projectId = $p AND storyKey = $k ORDER BY seq', { p: p.id, k: s.key });
+  const tests = all('SELECT id, scenarioId, title, method, endpoint, testType, priority, status, label, lastResult, lastRunAt, tags FROM test_cases WHERE projectId = $p AND storyKey = $k ORDER BY seq', { p: p.id, k: s.key })
+    .map((t) => {
+      let tags = t.tags;
+      if (typeof tags === 'string') {
+        try { tags = JSON.parse(tags || '[]'); } catch { tags = []; }
+      }
+      return { ...t, tags: tags || [] };
+    });
   const defects = repo.find('defects', 'projectId = $p AND storyKey = $k', { p: p.id, k: s.key });
   const proposals = all('SELECT id, status, createdAt, decidedAt FROM proposals WHERE projectId = $p AND storyKey = $k ORDER BY createdAt DESC LIMIT 5', { p: p.id, k: s.key });
   return { ...s, scenarios, tests, defects, proposals, coverage: storyCoverage(p.id)[s.key] || null, classification: classifyStory(s) };
@@ -152,9 +160,23 @@ function requestedStoryKeys(body = {}) {
 function deleteStoryGenerated(p, storyKey) {
   const tests = repo.find('test_cases', 'projectId = $p AND storyKey = $k', { p: p.id, k: storyKey });
   const scenarios = repo.find('scenarios', 'projectId = $p AND storyKey = $k', { p: p.id, k: storyKey });
-  tests.forEach((t) => repo.remove('test_cases', t.id));
-  scenarios.forEach((s) => repo.remove('scenarios', s.id));
-  return { tests: tests.length, scenarios: scenarios.length, ids: tests.map((t) => t.id) };
+  const ids = [];
+  let unlinked = 0;
+  tests.forEach((t) => {
+    if (hasTag(t, 'imported')) {
+      repo.update('test_cases', t.id, { storyKey: null, updatedAt: now() });
+      unlinked++;
+    } else {
+      repo.remove('test_cases', t.id);
+      ids.push(t.id);
+    }
+  });
+  let scenariosRemoved = 0;
+  scenarios.forEach((s) => {
+    const n = get('SELECT COUNT(*) AS n FROM test_cases WHERE scenarioId = $s', { s: s.id }).n;
+    if (!n) { repo.remove('scenarios', s.id); scenariosRemoved++; }
+  });
+  return { tests: ids.length, unlinked, scenarios: scenariosRemoved, ids };
 }
 
 async function resolveStory(p, storyKey, { fetchIfMissing = true } = {}) {
@@ -242,13 +264,22 @@ route('POST', '/api/stories/plan-from-docs', async (ctx) => {
   return { ...proposal, approved: false, note: 'Proposal only. Approve in the UI before tests are saved or run.' };
 });
 
+route('POST', '/api/stories/:key/link-tests', async (ctx) => {
+  const p = projectFrom(ctx);
+  const story = await resolveStory(p, String(ctx.params.key || '').toUpperCase(), { fetchIfMissing: true });
+  const ids = (ctx.body && (ctx.body.ids || ctx.body.testCaseIds)) || [];
+  if (!ids.length) throw new HttpError(400, 'Select at least one test case to attach.');
+  const r = applyStoryKey(p, ids, story.key, ctx.user);
+  return { ...r, storyKey: story.key, linked: r.updated };
+});
+
 route('DELETE', '/api/stories/:key/tests', (ctx) => {
   const p = projectFrom(ctx);
   const story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: ctx.params.key });
   if (!story) throw new HttpError(404, `Story ${ctx.params.key} is not on this project.`);
   const r = transaction(() => deleteStoryGenerated(p, story.key));
   audit('tests', 'story.tests-deleted', { user: ctx.user, projectId: p.id, detail: { storyKey: story.key, ...r } });
-  return { deleted: true, storyKey: story.key, tests: r.tests, scenarios: r.scenarios };
+  return { deleted: true, storyKey: story.key, tests: r.tests, unlinked: r.unlinked || 0, scenarios: r.scenarios };
 });
 
 route('PATCH', '/api/proposals/:id', (ctx) => {

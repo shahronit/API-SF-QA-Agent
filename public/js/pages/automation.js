@@ -19,13 +19,10 @@
   async function applyImport(r) {
     await QA.state.reloadProjects();
     if (r.project && r.project.id) QA.state.setProject(r.project.id);
-    if (r.href) {
-      toast(r.notice || 'Imported. Set the frontend HTTP base URL and token to run these tests.', 'warn', 'HTTP details needed');
-      QA.router.go(r.href);
-      return;
-    }
-    toast(r.notice || `Imported ${r.imported} requests.`, 'ok', r.created ? 'Project created' : 'Collection imported');
-    QA.router.go('/testcases?tag=imported');
+    const n = r.imported || (r.ids && r.ids.length) || 0;
+    toast(r.notice || `Imported ${n} request(s) as tests.`, 'ok', r.created ? 'Project created' : 'Collection imported');
+    if (r.setupHref) toast('Set the HTTP base URL and token on Connections if these frontend tests need them.', 'warn', 'HTTP details');
+    QA.router.go(r.testsHref || '/testcases');
   }
 
   function importCard(p) {

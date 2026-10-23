@@ -11,13 +11,25 @@ const TEST_TYPES = ['Functional', 'Negative', 'Boundary', 'Security', 'Integrati
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 const ASSERTION_TYPES = ['status', 'jsonpath', 'header', 'responseTime', 'sfError', 'schema', 'bodyContains'];
 
+function validEndpoint(ep) {
+  const s = String(ep || '').trim();
+  return s.startsWith('/') || /^https?:\/\//i.test(s) || /^\{\{[A-Za-z_][\w]*\}\}/.test(s);
+}
+
+function hasTag(t, tag) {
+  const tags = Array.isArray(t && t.tags) ? t.tags : [];
+  return tags.includes(tag);
+}
+
 function validateTestCase(t, partial = false) {
   if (!partial) required(t, ['title', 'method', 'endpoint', 'testType']);
   if (t.method !== undefined && !METHODS.includes(String(t.method).toUpperCase())) throw new HttpError(400, `Method must be one of ${METHODS.join(', ')}.`);
   if (t.testType !== undefined && !TEST_TYPES.includes(t.testType)) throw new HttpError(400, `Test type must be one of ${TEST_TYPES.join(', ')}.`);
   if (t.priority !== undefined && t.priority !== null && !PRIORITIES.includes(t.priority)) throw new HttpError(400, 'Priority must be P0, P1, P2 or P3.');
   if (t.auth !== undefined && !['default', 'none', 'invalid', 'lowpriv'].includes(t.auth)) throw new HttpError(400, 'Auth must be default, none, invalid or lowpriv.');
-  if (t.endpoint !== undefined && !(String(t.endpoint).startsWith('/') || /^https:\/\//.test(t.endpoint))) throw new HttpError(400, 'Endpoint must be a path starting with / (relative to the instance URL) or an https:// URL.');
+  if (t.endpoint !== undefined && !validEndpoint(t.endpoint)) {
+    throw new HttpError(400, 'Endpoint must be a path starting with /, an http(s) URL, or a template such as {{baseUrl}}/v1/orders.');
+  }
   if (t.assertions !== undefined) {
     if (!Array.isArray(t.assertions)) throw new HttpError(400, 'assertions must be an array.');
     t.assertions.forEach((a, i) => { if (!ASSERTION_TYPES.includes(a.type)) throw new HttpError(400, `Assertion #${i + 1} has unknown type "${a.type}".`, { action: `Use one of ${ASSERTION_TYPES.join(', ')}.` }); });
@@ -77,6 +89,7 @@ route('GET', '/api/testcases', (ctx) => {
   inFilter(where, params, 'lastResult', ctx.query.lastResult, 'lr');
   inFilter(where, params, 'label', ctx.query.label, 'lb');
   if (ctx.query.tag) { params.tag = `%"${ctx.query.tag}"%`; where.push('tags LIKE $tag'); }
+  if (ctx.query.unlinked === 'true' || ctx.query.unlinked === '1') where.push("(storyKey IS NULL OR storyKey = '')");
   dateRange(where, params, 'lastRunAt', ctx.query.from, ctx.query.to);
   likeFilter(where, params, ['id', 'title', 'endpoint', 'storyKey'], ctx.query.q);
   const columns = 'id, projectId, scenarioId, storyKey, seq, title, apiType, method, endpoint, auth, testType, priority, status, label, tags, object, lastRunAt, lastResult, lastResponseMs, automated';
@@ -157,10 +170,31 @@ route('DELETE', '/api/testcases/:id', (ctx) => {
   return { deleted: true, scenarioRemoved };
 });
 
+function applyStoryKey(p, ids, storyKey, user) {
+  const key = storyKey ? String(storyKey).trim().toUpperCase() : null;
+  if (key && !/^[A-Z][A-Z0-9_]+-\d+$/.test(key)) throw new HttpError(400, 'Story key must look like PROJ-123.');
+  if (key) {
+    const story = repo.one('stories', 'projectId = $p AND key = $k', { p: p.id, k: key });
+    if (!story) throw new HttpError(404, `Story ${key} is not on this project.`, { action: 'Open the Jira ticket (or add it) first, then attach tests.' });
+  }
+  const linked = [];
+  for (const raw of ids || []) {
+    const t = repo.get('test_cases', String(raw));
+    if (!t || t.projectId !== p.id) continue;
+    repo.update('test_cases', t.id, { storyKey: key, updatedAt: now() });
+    linked.push(t.id);
+  }
+  audit('tests', key ? 'testcase.linked-story' : 'testcase.unlinked-story', { user, projectId: p.id, detail: { count: linked.length, storyKey: key, ids: linked } });
+  return { updated: linked.length, storyKey: key, ids: linked };
+}
+
 route('POST', '/api/testcases/bulk', (ctx) => {
   const p = projectFrom(ctx);
   const ids = (ctx.body.ids || []).map(String);
   if (!ids.length) throw new HttpError(400, 'Select at least one test case.');
+  if (ctx.body.storyKey !== undefined && !ctx.body.delete) {
+    return applyStoryKey(p, ids, ctx.body.storyKey, ctx.user);
+  }
   const patch = {};
   for (const k of ['priority', 'status', 'testType']) if (ctx.body[k]) patch[k] = ctx.body[k];
   validateTestCase(patch, true);
@@ -212,4 +246,4 @@ route('GET', '/api/insights', (ctx) => {
   return { threshold, failingEndpoints: endpointStats, duplicates: dupes, gaps, typeDistribution: types };
 });
 
-module.exports = { validateTestCase };
+module.exports = { validateTestCase, applyStoryKey, hasTag, validEndpoint };

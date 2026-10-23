@@ -316,7 +316,7 @@
         <label class="check-row"><input type="checkbox" name="deps" checked> Include upstream setup tests that produce required variables</label>
         <label class="check-row"><input type="checkbox" name="postResultToJira" ${preset.postResultToJira ? 'checked' : ''}> After the run, post a pass/fail comment on the Jira story (not a defect)</label>
         ${runnerPicker(p)}
-        <p class="small muted">Empty filters run every ready test. Drafts and disabled tests are skipped. Production writes still need confirmation.</p></div>`,
+        <p class="small muted">Empty filters run every ready test, including imported collection requests. Drafts and disabled tests are skipped. Jira generate/approve is only for suites that are not saved yet. Production writes still need confirmation.</p></div>`,
       foot: h`<button class="btn" data-close>Cancel</button><button class="btn primary" data-go>${ic('play')} Start run</button>`,
       onMount(el, close) {
         const sel = { priority: new Set([].concat(preset.priority || [])), testType: new Set([].concat(preset.testType || [])) };
