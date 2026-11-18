@@ -18,6 +18,7 @@ const { httpSettings } = transport;
 const cookies = require('./cookie-jar');
 const bodyEncode = require('./body-encode');
 const { applyAuth } = require('./auth-apply');
+const { injectOAuthTokenBody } = require('./oauth-inject');
 const sandbox = require('./script-sandbox');
 const envs = require('./environments');
 
@@ -179,6 +180,8 @@ async function execute(project, body, user) {
     authConfig: interpolate(body.authConfig || {}, vars, missing),
     headers, query, vars, missing,
     transport, settings,
+    project,
+    target: path,
   });
 
   const mode = String(body.bodyMode || (body.apiType === 'SOAP' ? 'xml' : 'json')).toLowerCase();
@@ -192,6 +195,9 @@ async function execute(project, body, user) {
       binary: body.binary,
     });
     bodyEncode.applyContentType(headers, encoded.contentType);
+  }
+  if (typeof encoded.body === 'string') {
+    encoded.body = injectOAuthTokenBody(project, { method, path, bodyRaw: encoded.body });
   }
 
   const unresolved = [...missing].filter((m) => !m.startsWith('$') && m !== 'sessionId' && m !== 'accessToken');

@@ -22,6 +22,7 @@ const { seedFromProject, seedOrgFromSalesforce, seedAuthVars, knownFallback, app
 const envs = require('./environments');
 const { inferHttpOriginForProject, persistHttpOrigin } = require('./collection-import');
 const bodyEncode = require('./body-encode');
+const { injectOAuthTokenBody } = require('./oauth-inject');
 
 const active = new Map(); // runId -> { emitter, stopRequested, done }
 const MAX_BODY = 200 * 1024;
@@ -493,8 +494,14 @@ async function executeOne({ tc, base, sf, project, vars, varSource, run, created
       evidence: producers,
     });
   }
-  const { body, bodyRaw, reqVars, headers, query } = round;
-  let { endpoint } = round;
+  const { body, reqVars, headers, query } = round;
+  let { endpoint, bodyRaw } = round;
+  if (typeof bodyRaw === 'string') {
+    bodyRaw = injectOAuthTokenBody(project, { method: tc.method, path: endpoint, bodyRaw });
+  } else if (typeof body === 'string') {
+    const injected = injectOAuthTokenBody(project, { method: tc.method, path: endpoint, bodyRaw: body });
+    if (injected !== body) bodyRaw = injected;
+  }
   if (httpTest && !/^https?:\/\//i.test(endpoint) && !httpFor(project).available && !vars.httpBaseUrl) {
     return blockedResult(base, { ...httpFor(project).unavailableExplanation(), category: 'configuration' });
   }

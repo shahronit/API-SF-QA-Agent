@@ -171,6 +171,19 @@ class HybridSalesforce {
   async queryTooling(soql) { return this._first('queryTooling', [soql]); }
   async orgDisplay() { return this._first('orgDisplay', []); }
 
+  async token(variant = 'default') {
+    if (this.rest && this.rest.available && typeof this.rest.token === 'function') return this.rest.token(variant);
+    const ex = (this.rest && this.rest.unavailableExplanation && this.rest.unavailableExplanation()) || {
+      code: 'SALESFORCE_NOT_CONFIGURED',
+      title: 'Salesforce credentials are not configured.',
+      cause: 'No AUTH_FLOW and client id are set for this project.',
+      action: 'Set SF_<PREFIX>_AUTH_FLOW, CLIENT_ID and, for the refresh_token flow, REFRESH_TOKEN.',
+      category: 'configuration',
+      evidence: [],
+    };
+    throw new ConnectorError(ex);
+  }
+
   async request(r) {
     if (this.rest && this.rest.available) return this.rest.request(r);
     if (this.cli && this.cli.available) return this.cli.request(r);

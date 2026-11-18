@@ -96,7 +96,7 @@
     const c = req.authConfig || {};
     return h`<div data-auth-fields>
       <div data-af="bearer" class="${a === 'bearer' ? '' : 'hidden'}">
-        <label class="field"><span>Token</span><input class="input mono" name="auth_token" value="${c.token || ''}" placeholder="token — or {{accessToken}}"></label>
+        <label class="field"><span>Token (optional)</span><input class="input mono" name="auth_token" value="${c.token || ''}" placeholder="leave blank to use the project token"><span class="small muted">Leave blank to use the project's refresh token or client credentials. A pasted token is sent as-is and is not saved back from the response.</span></label>
       </div>
       <div data-af="basic" class="${a === 'basic' ? '' : 'hidden'}">
         <div class="row wrap" style="gap:8px"><label class="field" style="flex:1"><span>Username</span><input class="input" name="auth_user" value="${c.username || ''}"></label>
@@ -109,7 +109,7 @@
       </div>
       <div data-af="oauth2" class="${a === 'oauth2' ? '' : 'hidden'}">
         <div class="row wrap" style="gap:8px">
-          <label class="field"><span>Grant</span><select class="select" name="oauth_grant"><option value="client_credentials" ${c.grantType !== 'authorization_code' ? 'selected' : ''}>Client credentials</option><option value="authorization_code" ${c.grantType === 'authorization_code' ? 'selected' : ''}>Authorization code</option></select></label>
+          <label class="field"><span>Grant</span><select class="select" name="oauth_grant">${[['client_credentials', 'Client credentials'], ['refresh_token', 'Refresh token'], ['authorization_code', 'Authorization code']].map(([v, l]) => h`<option value="${v}" ${(c.grantType || 'client_credentials') === v ? 'selected' : ''}>${l}</option>`)}</select></label>
           <label class="field" style="flex:1"><span>Token URL</span><input class="input mono" name="oauth_token" value="${c.tokenUrl || ''}" placeholder="https://login.salesforce.com/services/oauth2/token"></label>
         </div>
         <div class="row wrap mt-s" style="gap:8px">
@@ -122,10 +122,11 @@
         </div>
         <div class="row wrap mt-s" style="gap:8px">
           <label class="field" style="flex:1"><span>Scope</span><input class="input" name="oauth_scope" value="${c.scope || ''}"></label>
-          <label class="field" style="flex:1"><span>Existing access token (optional)</span><input class="input mono" name="oauth_existing" value="${c.token || ''}"></label>
+          <label class="field" style="flex:1"><span>Existing access token (optional)</span><input class="input mono" name="oauth_existing" value="${c.token || ''}" placeholder="leave blank to fetch one"></label>
         </div>
+        <label class="field mt-s"><span>Refresh token (optional)</span><input class="input mono" type="password" name="oauth_refresh" value="${c.refreshToken || ''}" placeholder="leave blank to use the project refresh token" autocomplete="new-password"><span class="small muted">Leave blank to use the project's refresh token or client credentials. Required only for the refresh token grant on a host that is not this org.</span></label>
         <label class="field mt-s"><span>Authorization code (auth-code grant)</span><input class="input mono" name="oauth_code" value="${c.code || ''}" placeholder="paste the code from the redirect URL"></label>
-        <div class="row mt-s" style="gap:8px"><button class="btn sm" type="button" data-act="oauth-url">${ic('link')} Open authorize URL</button><span class="small muted">Open the authorize URL, then paste the returned code here and Send. Client credentials does not need a code.</span></div>
+        <div class="row mt-s" style="gap:8px"><button class="btn sm" type="button" data-act="oauth-url">${ic('link')} Open authorize URL</button><span class="small muted">Open the authorize URL, then paste the returned code here and Send. Client credentials and refresh token do not need a code.</span></div>
       </div>
     </div>`;
   }
@@ -183,7 +184,7 @@
     if (auth === 'oauth2') {
       cfg.grantType = g('oauth_grant') || 'client_credentials';
       cfg.tokenUrl = g('oauth_token'); cfg.clientId = g('oauth_id'); cfg.clientSecret = g('oauth_secret');
-      cfg.authUrl = g('oauth_auth'); cfg.redirectUri = g('oauth_redir'); cfg.scope = g('oauth_scope'); cfg.token = g('oauth_existing'); cfg.code = g('oauth_code');
+      cfg.authUrl = g('oauth_auth'); cfg.redirectUri = g('oauth_redir'); cfg.scope = g('oauth_scope'); cfg.token = g('oauth_existing'); cfg.code = g('oauth_code'); cfg.refreshToken = g('oauth_refresh');
     }
     return { auth, authConfig: cfg };
   }
@@ -306,7 +307,7 @@
     set('auth_token', c.token); set('auth_user', c.username); set('auth_pass', c.password);
     set('auth_key', c.key); set('auth_keyval', c.value); set('auth_in', c.in);
     set('oauth_grant', c.grantType); set('oauth_token', c.tokenUrl); set('oauth_id', c.clientId);
-    set('oauth_secret', c.clientSecret); set('oauth_auth', c.authUrl); set('oauth_redir', c.redirectUri); set('oauth_scope', c.scope); set('oauth_existing', c.token); set('oauth_code', c.code);
+    set('oauth_secret', c.clientSecret); set('oauth_auth', c.authUrl); set('oauth_redir', c.redirectUri); set('oauth_scope', c.scope); set('oauth_existing', c.token); set('oauth_code', c.code); set('oauth_refresh', c.refreshToken);
     root.querySelectorAll('[data-af]').forEach((p) => p.classList.toggle('hidden', p.dataset.af !== (req.auth || '')));
     if (req.bodyMode) root.querySelectorAll('[data-bm]').forEach((p) => p.classList.toggle('hidden', p.dataset.bm !== req.bodyMode));
     const fillKv = (name, rows) => {

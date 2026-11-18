@@ -140,6 +140,14 @@ class DemoSalesforce {
     this.store = stores.get(project.id);
   }
 
+  async token() {
+    return {
+      accessToken: '00D5g000000DEMO!AQ0AQDemoTokenValueForSimulatorOnly0000000000',
+      instanceUrl: 'https://demo-org.my.salesforce.com',
+      expiresAt: Date.now() + 25 * 60 * 1000,
+    };
+  }
+
   seedStore() {
     const s = { objects: {}, counters: {}, idempotency: new Map(), bulkJobs: new Map(), cursors: new Map() };
     for (const name of Object.keys(OBJECTS)) s.objects[name] = new Map();
