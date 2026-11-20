@@ -30,7 +30,7 @@ class CommerceCloudConnector {
     return {
       code: 'COMMERCE_NOT_CONFIGURED',
       title: 'Salesforce Commerce Cloud is not connected. OCAPI/SCAPI tests cannot run against a live storefront.',
-      cause: `Need SFCC_<PREFIX>_CLIENT_ID / CLIENT_SECRET and a host or shortCode+orgId on the project.`,
+      cause: 'Need a SLAS client id (public) or client id and secret (private), plus a host or shortCode+orgId on the project.',
       action: 'Open Connections → Commerce Cloud, save the storefront identifiers and credential prefix, then add SFCC_<PREFIX>_* to .env (or use Save to .env on loopback) and Test connections.',
       category: 'configuration',
       evidence: [],
@@ -45,9 +45,27 @@ class CommerceCloudConnector {
 
     let url; let headers; let body;
     if (this.cfg.shortCode && this.cfg.orgId) {
-      url = `https://${this.cfg.shortCode}.api.commercecloud.salesforce.com/shopper/auth/v1/organizations/${this.cfg.orgId}/oauth2/token`;
-      body = new URLSearchParams({ grant_type: 'client_credentials', client_id: this.creds.clientId, client_secret: this.creds.clientSecret });
+      // SLAS private clients authenticate with HTTP Basic. Public clients send
+      // client_id in the body. channel_id is the site id and is required for both.
+      url = `https://${this.cfg.shortCode}.api.commercecloud.salesforce.com/shopper/auth/v1/organizations/${encodeURIComponent(this.cfg.orgId)}/oauth2/token`;
+      const form = new URLSearchParams({ grant_type: 'client_credentials' });
+      if (this.cfg.siteId) form.set('channel_id', this.cfg.siteId);
       headers = { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' };
+      if (this.creds.clientSecret) {
+        headers.Authorization = `Basic ${Buffer.from(`${this.creds.clientId}:${this.creds.clientSecret}`).toString('base64')}`;
+      } else {
+        form.set('client_id', this.creds.clientId);
+      }
+      body = form;
+    } else if (!this.creds.clientSecret) {
+      throw new ConnectorError({
+        code: 'COMMERCE_SECRET_REQUIRED',
+        title: 'Commerce Cloud OCAPI needs a client secret.',
+        cause: 'The Account Manager token endpoint only accepts a private client. This project has a client id and no secret, and no SCAPI short code.',
+        action: 'Add the SLAS private client secret, or set the SCAPI short code and organization id so a public SLAS client can be used.',
+        category: 'configuration',
+        evidence: [],
+      });
     } else {
       url = 'https://account.demandware.com/dw/oauth2/access_token';
       const basic = Buffer.from(`${this.creds.clientId}:${this.creds.clientSecret}`).toString('base64');
@@ -62,11 +80,46 @@ class CommerceCloudConnector {
       throw new ConnectorError(explainNetworkError(e, url));
     }
     if (!res.ok || !json.access_token) {
+      if (!res.ok && !this.creds.clientSecret && this.cfg.shortCode) throw new ConnectorError(this.missingSecret(res.status, url));
       throw new ConnectorError({ ...explainResponse({ status: res.status, body: json, method: 'POST', url }), title: `Commerce Cloud token request failed (${res.status})` });
     }
     const entry = { accessToken: json.access_token, expiresAt: Date.now() + Math.max(60, Number(json.expires_in || 900) - 60) * 1000 };
     tokenCache.set(key, entry);
     return entry;
+  }
+
+  missingSecret(status, url) {
+    const ref = this.cfg.credentialRef || this.project.credentialRef || 'PREFIX';
+    return {
+      code: 'COMMERCE_SECRET_REQUIRED',
+      title: 'Commerce Cloud private client secret is missing',
+      cause: 'SLAS rejected this client id. The imported private client secret is a description, not a secret, so it was not used.',
+      action: `Open Connections and set SFCC_${ref}_CLIENT_SECRET to the SLAS private client secret, then test the connection again.`,
+      category: 'configuration',
+      evidence: status ? [`HTTP ${status} from POST ${url}`] : [],
+    };
+  }
+
+  tokenBody(existing) {
+    const form = new URLSearchParams();
+    const raw = existing == null ? '' : String(existing);
+    if (raw.trim().startsWith('{')) {
+      try {
+        const obj = JSON.parse(raw);
+        for (const [k, v] of Object.entries(obj || {})) if (v != null && v !== '') form.set(k, String(v));
+      } catch { /* defaults below */ }
+    } else if (raw) {
+      for (const [k, v] of new URLSearchParams(raw)) if (v !== '') form.set(k, v);
+    }
+    if (!form.get('grant_type')) form.set('grant_type', 'client_credentials');
+    if (!form.get('channel_id') && this.cfg.siteId) form.set('channel_id', this.cfg.siteId);
+    if (this.creds && this.creds.clientSecret) {
+      form.delete('client_id');
+      form.delete('client_secret');
+    } else if (this.creds && this.creds.clientId && !form.get('client_id')) {
+      form.set('client_id', this.creds.clientId);
+    }
+    return form;
   }
 
   originFor(path) {
@@ -84,7 +137,8 @@ class CommerceCloudConnector {
   async request(r) {
     const auth = r.auth || 'default';
     const headers = { Accept: 'application/json', ...(r.headers || {}) };
-    if (auth === 'default' || auth === 'lowpriv') {
+    const isTokenCall = /\/oauth2\/(token|revoke)(?:\?|$)/i.test(String(r.path || '')) || /\/dw\/oauth2\/access_token/i.test(String(r.path || ''));
+    if ((auth === 'default' || auth === 'lowpriv') && !isTokenCall) {
       const t = await this.token();
       headers.Authorization = `Bearer ${t.accessToken}`;
     } else if (auth === 'invalid') {
@@ -102,6 +156,13 @@ class CommerceCloudConnector {
     } else if (r.body !== undefined && r.body !== null && !['GET', 'HEAD'].includes(r.method)) {
       payload = JSON.stringify(r.body);
       if (!Object.keys(headers).some((h) => h.toLowerCase() === 'content-type')) headers['Content-Type'] = 'application/json';
+    }
+    if (isTokenCall && auth !== 'none' && auth !== 'invalid') {
+      payload = this.tokenBody(payload);
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      if (this.creds && this.creds.clientSecret) {
+        headers.Authorization = `Basic ${Buffer.from(`${this.creds.clientId}:${this.creds.clientSecret}`).toString('base64')}`;
+      }
     }
     const started = performance.now();
     let res;
@@ -152,7 +213,7 @@ class CommerceCloudConnector {
       checks.ocapi = { status: res.status, ok: res.status < 400 };
     }
     if (this.cfg.shortCode && this.cfg.orgId) {
-      const res = await this.request({ method: 'GET', path: `/search/shopper-search/v1/organizations/${this.cfg.orgId}/product-search`, query: { q: 'a', limit: 1 }, auth: 'default' });
+      const res = await this.request({ method: 'GET', path: `/search/shopper-search/v1/organizations/${this.cfg.orgId}/product-search`, query: { siteId: site, q: 'a', limit: 1 }, auth: 'default' });
       checks.scapi = { status: res.status, ok: res.status < 400 };
     }
     const ok = Object.values(checks).some((c) => c.ok) || (!this.cfg.host && !(this.cfg.shortCode && this.cfg.orgId));
@@ -182,7 +243,7 @@ class CommerceCloudConnector {
       const res = await this.request({
         method: 'GET',
         path: `/search/shopper-search/v1/organizations/${this.cfg.orgId}/product-search`,
-        query: { q, limit: 1 },
+        query: { siteId: site, q, limit: 1 },
         auth: 'default',
       });
       const hit = res.body && Array.isArray(res.body.hits) ? res.body.hits[0] : null;

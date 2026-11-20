@@ -4,7 +4,7 @@ process.env.SEED_DEMO = 'false';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { repo, now } = require('../db');
-const { applyEnvironmentToProject } = require('../engine/env-apply');
+const { applyEnvironmentToProject, credentialEnvPairs } = require('../engine/env-apply');
 const envs = require('../engine/environments');
 
 function projectRow(id, extra = {}) {
@@ -139,6 +139,47 @@ test('credential env keys fill empty-only unless overwrite', () => {
     assert.ok(over.credentials.keys.includes(key));
   } finally {
     delete process.env[key];
+  }
+});
+
+test('instruction text is not stored as the Commerce client id or secret', () => {
+  const idKey = 'SFCC_PRJ_PH_1_CLIENT_ID';
+  const secretKey = 'SFCC_PRJ_PH_1_CLIENT_SECRET';
+  process.env[idKey] = 'Private client when client was created in SLAS';
+  process.env[secretKey] = 'Private client secret when client was created in SLAS';
+  try {
+    const doc = {
+      name: 'PCL placeholders',
+      values: [
+        { key: 'private_client_id', value: 'Private client when client was created in SLAS' },
+        { key: 'private_client_secret', value: 'Private client secret when client was created in SLAS' },
+        { key: 'public_client_id', value: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+        { key: 'client_id', value: '11111111-2222-3333-4444-555555555555' },
+        { key: 'shortCode', value: 'vqa8a34l' },
+        { key: 'organization_id', value: 'f_ecom_blnk_003' },
+      ],
+    };
+    const p = projectRow('PRJ-PH-1', { credentialRef: 'PRJ_PH_1' });
+    const creds = credentialEnvPairs(p, {
+      private_client_id: 'Private client when client was created in SLAS',
+      private_client_secret: 'Private client secret when client was created in SLAS',
+      public_client_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      client_id: '11111111-2222-3333-4444-555555555555',
+      shortCode: 'vqa8a34l',
+      organization_id: 'f_ecom_blnk_003',
+    }, { fillEmptyOnly: true, ref: 'PRJ_PH_1' });
+    assert.equal(creds.pairs[idKey], 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    assert.equal(creds.pairs[secretKey], undefined);
+    assert.ok(creds.applied.includes('Commerce client id'));
+    assert.ok(!creds.applied.includes('Commerce client secret'));
+    repo.insert('projects', p);
+    const r = applyEnvironmentToProject(p, doc, { user: 'qa' });
+    assert.ok(r.credentials.keys.includes(idKey));
+    assert.ok(!r.credentials.keys.includes(secretKey));
+    assert.doesNotMatch(JSON.stringify(r), /Private client/);
+  } finally {
+    delete process.env[idKey];
+    delete process.env[secretKey];
   }
 });
 

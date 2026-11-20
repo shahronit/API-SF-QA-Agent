@@ -6,7 +6,7 @@
  * written to project JSON and are never returned in API payloads.
  */
 const { repo, now, audit } = require('../db');
-const { config, normRef, secretValues } = require('../config');
+const { config, normRef, secretValues, isUsableCredential } = require('../config');
 const { classifyLoginUrl, salesforceLoginOrigin } = require('../connectors/salesforce-org');
 const { upsertEnv } = require('../lib/dotenv-write');
 const { registerSecrets } = require('../lib/mask');
@@ -63,6 +63,16 @@ function pick(vars, keys) {
   return '';
 }
 
+function pickUsable(vars, keys) {
+  const folded = {};
+  for (const [k, v] of Object.entries(vars || {})) folded[foldKey(k)] = v;
+  for (const k of keys) {
+    const hit = vars[k] || folded[foldKey(k)];
+    if (isUsableCredential(hit)) return hit;
+  }
+  return '';
+}
+
 function publicEnvironment(row) {
   if (!row) return row;
   const values = (row.values || row.envValues || []).map((v) => {
@@ -90,7 +100,7 @@ function isCommerceVars(vars) {
 
 function emptyEnvKey(key, fillEmptyOnly) {
   if (!fillEmptyOnly) return true;
-  return !process.env[key];
+  return !isUsableCredential(process.env[key]);
 }
 
 /** Build the same SF_/SFCC_/HTTP_ pairs the Connections UI saves via upsertEnv. */
@@ -104,8 +114,10 @@ function credentialEnvPairs(project, vars, { fillEmptyOnly = true, ref } = {}) {
     if (label && !applied.includes(label)) applied.push(label);
   };
   const commerce = isCommerceVars(vars);
-  const sfccId = pick(vars, ['private_client_id', 'ccClientId', 'client_id', 'public_client_id']);
-  const sfccSecret = pick(vars, ['private_client_secret', 'ccClientSecret', 'client_secret']);
+  const sfccSecret = pickUsable(vars, ['private_client_secret', 'ccClientSecret', 'client_secret']);
+  const sfccId = pickUsable(vars, sfccSecret
+    ? ['private_client_id', 'ccClientId', 'client_id', 'public_client_id']
+    : ['public_client_id', 'client_id', 'ccClientId', 'private_client_id']);
   const sfId = pick(vars, ['sfClientId', 'connectedAppClientId']);
   const sfSecret = pick(vars, ['sfClientSecret']);
   const sfUser = pick(vars, ['username', 'sfUsername', 'userName']);

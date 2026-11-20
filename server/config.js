@@ -101,11 +101,24 @@ function postmanSettings(ref) {
   return { url, command, apiKey, workspace, timeoutMs: Number(env(p + 'MCP_TIMEOUT_MS') || env('POSTMAN_MCP_TIMEOUT_MS') || 20000) };
 }
 
+/**
+ * A SLAS/OCAPI client id or secret that can actually be sent.
+ * Postman environments often store the field description
+ * ("Private client when client was created in SLAS") in the value.
+ */
+function isUsableCredential(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s || /\s/.test(s)) return false;
+  if (/\{\{|\}\}/.test(s)) return false;
+  if (/^(your_|placeholder|example|changeme|xxx+)/i.test(s)) return false;
+  return true;
+}
+
 function commerceCredentials(ref) {
   const p = `SFCC_${normRef(ref)}_`;
-  const clientId = env(p + 'CLIENT_ID') || env('SFCC_CLIENT_ID');
-  const clientSecret = env(p + 'CLIENT_SECRET') || env('SFCC_CLIENT_SECRET');
-  if (!ref || !clientId || !clientSecret) return null;
+  const clientId = [env(p + 'CLIENT_ID'), env('SFCC_CLIENT_ID')].find(isUsableCredential) || '';
+  const clientSecret = [env(p + 'CLIENT_SECRET'), env('SFCC_CLIENT_SECRET')].find(isUsableCredential) || '';
+  if (!ref || !clientId) return null;
   return { clientId, clientSecret };
 }
 
@@ -151,8 +164,8 @@ function credentialStatus(sfRef, jiraRef, commerceRef) {
     },
     commerce: {
       prefix: ccPrefix,
-      clientId: has(ccPrefix + 'CLIENT_ID') || has('SFCC_CLIENT_ID'),
-      clientSecret: has(ccPrefix + 'CLIENT_SECRET') || has('SFCC_CLIENT_SECRET'),
+      clientId: isUsableCredential(env(ccPrefix + 'CLIENT_ID') || env('SFCC_CLIENT_ID')),
+      clientSecret: isUsableCredential(env(ccPrefix + 'CLIENT_SECRET') || env('SFCC_CLIENT_SECRET')),
       configured: Boolean(commerceCredentials(commerceRef || sfRef)),
     },
     postman: {
@@ -190,4 +203,4 @@ function secretValues() {
 
 const SF_UNAVAILABLE_MESSAGE = 'Salesforce MCP is unavailable. API test design and automation generation are available, but live Salesforce validation is disabled.';
 
-module.exports = { SF_UNAVAILABLE_MESSAGE, config, salesforceCredentials, jiraCredentials, salesforceMcpSettings, commerceCredentials, httpCredentials, postmanSettings, playwrightSettings, credentialStatus, secretValues, normRef };
+module.exports = { SF_UNAVAILABLE_MESSAGE, config, salesforceCredentials, jiraCredentials, salesforceMcpSettings, commerceCredentials, isUsableCredential, httpCredentials, postmanSettings, playwrightSettings, credentialStatus, secretValues, normRef };
